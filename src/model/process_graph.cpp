@@ -1,7 +1,6 @@
 #include "model/process_graph.hpp"
 #include <cmath>
 #include <algorithm>
-#include <random>
 
 namespace nerv {
 
@@ -50,12 +49,23 @@ ProcessGraph::ProcessGraph() {
     m_hub_node.name = "NERV SYSTEM HUB";
     m_hub_node.position = {0.0f, 0.0f};
     m_hub_node.target_position = {0.0f, 0.0f};
-    m_hub_node.radius = 32.0f;
-    m_hub_node.target_radius = 32.0f;
-    m_hub_node.glow_intensity = 0.8f;
+    m_hub_node.radius = 34.0f;
+    m_hub_node.target_radius = 34.0f;
+    m_hub_node.glow_intensity = 0.85f;
     m_hub_node.base_color = colors::ElectricCyan;
     m_hub_node.alpha = 1.0f;
     m_hub_node.is_pinned = true;
+}
+
+GraphLOD ProcessGraph::compute_lod(float zoom) const {
+    size_t count = get_active_node_count();
+    if (zoom < 0.45f || count > 600) {
+        return GraphLOD::LowDetail;
+    }
+    if (zoom <= 1.05f) {
+        return GraphLOD::MediumDetail;
+    }
+    return GraphLOD::FullDetail;
 }
 
 void ProcessGraph::update_from_snapshot(const TelemetrySnapshot& snapshot) {
@@ -64,33 +74,47 @@ void ProcessGraph::update_from_snapshot(const TelemetrySnapshot& snapshot) {
     // Update central hub metrics
     m_hub_node.metrics.cpu_percent = snapshot.system.total_cpu_percent;
     m_hub_node.metrics.resident_memory_bytes = snapshot.system.used_ram_bytes;
-    m_hub_node.target_glow = 0.4f + (snapshot.system.total_cpu_percent / 100.0f) * 1.5f;
+    m_hub_node.target_glow = 0.45f + (snapshot.system.total_cpu_percent / 100.0f) * 1.5f;
 
     std::unordered_map<ProcessIdentity, bool> current_seen;
 
-    std::mt19937 rng(42);
-    std::uniform_real_distribution<float> angle_dist(0.0f, 6.2831853f);
-    std::uniform_real_distribution<float> dist_dist(100.0f, 400.0f);
+    // Build PID to node index for deterministic parent attachment
+    std::unordered_map<uint32_t, ProcessIdentity> active_pid_map;
+    for (const auto& [id, node] : m_nodes) {
+        active_pid_map[node.pid] = id;
+    }
 
     for (const auto& proc : snapshot.processes) {
         current_seen[proc.identity] = true;
 
         auto it = m_nodes.find(proc.identity);
         if (it == m_nodes.end()) {
-            // New process node
+            // New process node — Deterministic position initialization
             GraphNode node;
             node.identity = proc.identity;
             node.pid = proc.identity.pid;
             node.parent_pid = proc.parent_pid;
             node.name = proc.name;
             node.metrics = proc;
-            node.alpha = 0.0f; // Will smoothly fade in
+            node.alpha = 0.0f; // Smooth fade-in
 
-            // Initial position: spawn near parent if known, else random orbit
-            float angle = angle_dist(rng);
-            float dist = dist_dist(rng);
-            node.position = {std::cos(angle) * dist, std::sin(angle) * dist};
+            // Deterministic golden-ratio angle derived from PID
+            float angle = (proc.identity.pid * 0.6180339887f) * 6.2831853f;
+
+            // Anchor near parent if parent exists in graph
+            auto parent_it = active_pid_map.find(proc.parent_pid);
+            if (parent_it != active_pid_map.end() && parent_it->first != proc.identity.pid) {
+                const auto& parent_node = m_nodes[parent_it->second];
+                float offset_dist = parent_node.radius + 24.0f + (proc.identity.pid % 6) * 6.0f;
+                node.position = parent_node.position + Vec2{std::cos(angle) * offset_dist, std::sin(angle) * offset_dist};
+            } else {
+                // Root process — Deterministic orbital ring around Hub
+                float orbit_radius = 160.0f + ((proc.identity.pid % 19) * 22.0f);
+                node.position = {std::cos(angle) * orbit_radius, std::sin(angle) * orbit_radius};
+            }
+
             node.target_position = node.position;
+            node.velocity = {0.0f, 0.0f};
 
             m_nodes[proc.identity] = node;
             it = m_nodes.find(proc.identity);
@@ -103,16 +127,16 @@ void ProcessGraph::update_from_snapshot(const TelemetrySnapshot& snapshot) {
         node.parent_pid = proc.parent_pid;
         node.is_terminating = false;
 
-        // Visual mapping: Radius based on RAM
+        // Visual mapping: Bounded logarithmic RAM scaling
         float ram_mb = static_cast<float>(proc.resident_memory_bytes) / (1024.0f * 1024.0f);
-        node.target_radius = std::clamp(8.0f + std::sqrt(std::max(0.0f, ram_mb)) * 1.4f, 8.0f, 45.0f);
+        node.target_radius = std::clamp(8.0f + std::sqrt(std::max(0.0f, ram_mb)) * 1.35f, 8.0f, 44.0f);
 
-        // Visual mapping: Glow based on CPU %
-        node.target_glow = 0.15f + (proc.cpu_percent / 100.0f) * 2.0f;
+        // Visual mapping: CPU Glow
+        node.target_glow = 0.15f + (proc.cpu_percent / 100.0f) * 2.2f;
 
-        // Visual mapping: Color based on state/category
+        // Visual mapping: Category / State Colors
         if (!proc.is_accessible) {
-            node.base_color = Vec4{0.2f, 0.25f, 0.35f, 0.6f};
+            node.base_color = Vec4{0.22f, 0.28f, 0.38f, 0.7f};
         } else if (proc.cpu_percent > 70.0f) {
             node.base_color = colors::CriticalRed;
         } else if (proc.cpu_percent > 30.0f) {
@@ -132,7 +156,7 @@ void ProcessGraph::update_from_snapshot(const TelemetrySnapshot& snapshot) {
                     node.base_color = colors::ElectricCyan;
                     break;
                 case ProcessCategory::BackgroundWorker:
-                    node.base_color = Vec4{0.4f, 0.6f, 0.85f, 0.8f};
+                    node.base_color = Vec4{0.45f, 0.65f, 0.90f, 0.85f};
                     break;
             }
         }
@@ -174,13 +198,36 @@ void ProcessGraph::rebuild_edges() {
 
         auto p_it = pid_to_id.find(node.parent_pid);
         if (p_it != pid_to_id.end() && p_it->second != id) {
-            edge.source_id = p_it->second;
-            edge.source_pos = m_nodes[p_it->second].position;
-            edge.color = colors::NeuralViolet;
-            edge.alpha = 0.35f;
-            edge.pulse_speed = 1.0f + (node.metrics.cpu_percent / 20.0f);
+            const auto& parent_node = m_nodes[p_it->second];
+
+            // Verify temporal consistency: parent must start before or at the same time as child
+            if (parent_node.identity.start_time_ns <= node.identity.start_time_ns) {
+                edge.relationship_type = RelationshipType::VerifiedParentChild;
+                edge.source_id = p_it->second;
+                edge.source_pos = parent_node.position;
+                edge.color = colors::NeuralViolet;
+                edge.alpha = 0.45f;
+                edge.pulse_speed = 1.0f + (node.metrics.cpu_percent / 20.0f);
+            } else {
+                // PID was reused by a new process born AFTER child: Inferred link
+                edge.relationship_type = RelationshipType::InferredParentExited;
+                edge.source_id = m_hub_node.identity;
+                edge.source_pos = m_hub_node.position;
+                edge.color = Vec4{0.25f, 0.35f, 0.50f, 0.30f};
+                edge.alpha = 0.30f;
+                edge.pulse_speed = 0.8f;
+            }
+        } else if (node.parent_pid != 0) {
+            // Parent PID was reported by OS, but parent has already exited
+            edge.relationship_type = RelationshipType::InferredParentExited;
+            edge.source_id = m_hub_node.identity;
+            edge.source_pos = m_hub_node.position;
+            edge.color = Vec4{0.25f, 0.35f, 0.50f, 0.30f};
+            edge.alpha = 0.30f;
+            edge.pulse_speed = 0.8f;
         } else {
             // Root process connected to System Hub
+            edge.relationship_type = RelationshipType::InferredSystemRoot;
             edge.source_id = m_hub_node.identity;
             edge.source_pos = m_hub_node.position;
             edge.color = colors::DeepNavy;
@@ -194,10 +241,11 @@ void ProcessGraph::rebuild_edges() {
 
 void ProcessGraph::update_simulation(float delta_time) {
     m_sim_tick += delta_time;
+    float dt = std::clamp(delta_time, 0.001f, 0.05f);
 
     // Smooth hub node properties
-    m_hub_node.radius += (m_hub_node.target_radius - m_hub_node.radius) * std::min(1.0f, delta_time * 8.0f);
-    m_hub_node.glow_intensity += (m_hub_node.target_glow - m_hub_node.glow_intensity) * std::min(1.0f, delta_time * 5.0f);
+    m_hub_node.radius += (m_hub_node.target_radius - m_hub_node.radius) * std::min(1.0f, dt * 8.0f);
+    m_hub_node.glow_intensity += (m_hub_node.target_glow - m_hub_node.glow_intensity) * std::min(1.0f, dt * 5.0f);
 
     // Update nodes
     for (auto it = m_nodes.begin(); it != m_nodes.end();) {
@@ -205,10 +253,10 @@ void ProcessGraph::update_simulation(float delta_time) {
 
         // Smooth fade-in
         if (!node.is_terminating) {
-            node.alpha += (1.0f - node.alpha) * std::min(1.0f, delta_time * 5.0f);
+            node.alpha += (1.0f - node.alpha) * std::min(1.0f, dt * 6.0f);
         } else {
             // Smooth fade-out before removal
-            node.termination_alpha -= delta_time * 2.0f;
+            node.termination_alpha -= dt * 2.5f;
             node.alpha = std::max(0.0f, node.termination_alpha);
             if (node.termination_alpha <= 0.0f) {
                 if (m_selected_id == node.identity) {
@@ -220,25 +268,25 @@ void ProcessGraph::update_simulation(float delta_time) {
         }
 
         // Smooth radius and glow interpolation
-        node.radius += (node.target_radius - node.radius) * std::min(1.0f, delta_time * 6.0f);
-        node.glow_intensity += (node.target_glow - node.glow_intensity) * std::min(1.0f, delta_time * 6.0f);
+        node.radius += (node.target_radius - node.radius) * std::min(1.0f, dt * 6.0f);
+        node.glow_intensity += (node.target_glow - node.glow_intensity) * std::min(1.0f, dt * 6.0f);
 
         // Position interpolation toward target if not Neural (or neural physics)
         if (m_current_layout != GraphLayoutType::NeuralGraph && !node.is_pinned) {
             Vec2 diff = node.target_position - node.position;
-            node.position += diff * std::min(1.0f, delta_time * 6.0f);
+            node.position += diff * std::min(1.0f, dt * 6.0f);
         }
 
         ++it;
     }
 
     if (m_current_layout == GraphLayoutType::NeuralGraph) {
-        apply_neural_layout_step(delta_time);
+        apply_neural_layout_step(dt);
     }
 
     // Animate edge data pulses
     for (auto& edge : m_edges) {
-        edge.pulse_progress += edge.pulse_speed * delta_time;
+        edge.pulse_progress += edge.pulse_speed * dt;
         if (edge.pulse_progress >= 1.0f) {
             edge.pulse_progress -= 1.0f;
         }
@@ -257,10 +305,14 @@ void ProcessGraph::update_simulation(float delta_time) {
 }
 
 void ProcessGraph::apply_neural_layout_step(float dt) {
-    float damping = 0.85f;
+    float damping = 0.88f;
     float repulsive_k = 6500.0f;
-    float spring_k = 0.04f;
+    float spring_k = 0.045f;
     float center_gravity = 0.08f;
+    float max_vel = 180.0f; // Velocity clamp for rock-solid stability
+
+    // Distance cutoff for repulsive forces (enables O(N) spatial scaling)
+    float cutoff_dist_sq = 120000.0f; // ~346px
 
     // Node-Node Repulsion
     for (auto& [id_a, a] : m_nodes) {
@@ -276,18 +328,18 @@ void ProcessGraph::apply_neural_layout_step(float dt) {
             force += (hub_diff / dist) * (repulsive_k * 2.0f / (dist + 30.0f));
         }
 
-        // Repulsion from other nodes (with distance cutoff for performance)
+        // Repulsion from other nodes (with distance cutoff)
         for (const auto& [id_b, b] : m_nodes) {
             if (id_a == id_b || b.is_filtered_out) continue;
 
             Vec2 diff = a.position - b.position;
             float dist_sq = diff.length_sq();
-            if (dist_sq > 0.1f && dist_sq < 160000.0f) {
+            if (dist_sq > 0.1f && dist_sq < cutoff_dist_sq) {
                 float dist = std::sqrt(dist_sq);
-                float min_sep = a.radius + b.radius + 15.0f;
-                float rep = repulsive_k / (dist + 10.0f);
+                float min_sep = a.radius + b.radius + 16.0f;
+                float rep = repulsive_k / (dist + 12.0f);
                 if (dist < min_sep) {
-                    rep *= 2.5f;
+                    rep *= 2.8f;
                 }
                 force += (diff / dist) * rep;
             }
@@ -297,6 +349,13 @@ void ProcessGraph::apply_neural_layout_step(float dt) {
         force -= a.position * center_gravity;
 
         a.velocity = (a.velocity + force * dt) * damping;
+
+        // Velocity clamping
+        float v_len = a.velocity.length();
+        if (v_len > max_vel) {
+            a.velocity = (a.velocity / v_len) * max_vel;
+        }
+
         a.position += a.velocity * dt;
     }
 
@@ -310,7 +369,7 @@ void ProcessGraph::apply_neural_layout_step(float dt) {
 
         Vec2 diff = src_pos - tgt_it->second.position;
         float dist = diff.length();
-        float desired_dist = 60.0f + tgt_it->second.radius;
+        float desired_dist = 65.0f + tgt_it->second.radius;
         float displacement = dist - desired_dist;
 
         if (dist > 0.001f) {
@@ -324,7 +383,6 @@ void ProcessGraph::apply_neural_layout_step(float dt) {
 }
 
 void ProcessGraph::calculate_hierarchy_layout() {
-    // Organize in radial tiers based on tree depth from Hub
     std::unordered_map<uint32_t, std::vector<ProcessIdentity>> children_map;
     std::vector<ProcessIdentity> roots;
 
@@ -342,16 +400,15 @@ void ProcessGraph::calculate_hierarchy_layout() {
         float r = 160.0f;
         m_nodes[roots[i]].target_position = {std::cos(angle) * r, std::sin(angle) * r};
 
-        // Position children radially outward
         auto c_it = children_map.find(roots[i].pid);
         if (c_it != children_map.end()) {
-            float child_arc = angle_step * 0.8f;
+            float child_arc = angle_step * 0.85f;
             float child_step = child_arc / std::max(1ULL, c_it->second.size());
             float start_a = angle - child_arc * 0.5f;
 
             for (size_t c = 0; c < c_it->second.size(); ++c) {
                 float ca = start_a + c * child_step;
-                float cr = r + 120.0f;
+                float cr = r + 130.0f;
                 m_nodes[c_it->second[c]].target_position = {std::cos(ca) * cr, std::sin(ca) * cr};
             }
         }
@@ -359,11 +416,6 @@ void ProcessGraph::calculate_hierarchy_layout() {
 }
 
 void ProcessGraph::calculate_cluster_layout() {
-    // 4 resource quadrants:
-    // Q1 (+X, +Y): CPU heavy
-    // Q2 (-X, +Y): RAM heavy
-    // Q3 (+X, -Y): I/O heavy
-    // Q4 (-X, -Y): Idle / Background
     std::vector<ProcessIdentity> cpu_group, ram_group, io_group, idle_group;
 
     for (const auto& [id, node] : m_nodes) {
@@ -382,32 +434,30 @@ void ProcessGraph::calculate_cluster_layout() {
         size_t n = group.size();
         for (size_t i = 0; i < n; ++i) {
             float a = (i * 6.2831853f) / std::max(1ULL, n);
-            float r = (i == 0) ? 0.0f : radius * (0.3f + 0.7f * ((i % 4) / 4.0f));
+            float r = (i == 0) ? 0.0f : radius * (0.3f + 0.7f * ((i % 5) / 5.0f));
             m_nodes[group[i]].target_position = center + Vec2{std::cos(a) * r, std::sin(a) * r};
         }
     };
 
-    layout_cluster(cpu_group,  { 260.0f,  200.0f}, 160.0f);
-    layout_cluster(ram_group,  {-260.0f,  200.0f}, 160.0f);
-    layout_cluster(io_group,   { 260.0f, -200.0f}, 160.0f);
-    layout_cluster(idle_group, {-260.0f, -200.0f}, 200.0f);
+    layout_cluster(cpu_group,  { 280.0f,  210.0f}, 170.0f);
+    layout_cluster(ram_group,  {-280.0f,  210.0f}, 170.0f);
+    layout_cluster(io_group,   { 280.0f, -210.0f}, 170.0f);
+    layout_cluster(idle_group, {-280.0f, -210.0f}, 220.0f);
 }
 
 void ProcessGraph::calculate_timeline_layout() {
-    // Sort processes by start time
     std::vector<std::pair<uint64_t, ProcessIdentity>> sorted;
     for (const auto& [id, node] : m_nodes) {
         sorted.push_back({id.start_time_ns, id});
     }
     std::sort(sorted.begin(), sorted.end());
 
-    // Spiral outward
     float a = 0.0f;
     float r = 100.0f;
     for (const auto& [time, id] : sorted) {
         m_nodes[id].target_position = {std::cos(a) * r, std::sin(a) * r};
-        a += 0.35f;
-        r += 2.5f;
+        a += 0.32f;
+        r += 2.2f;
     }
 }
 
@@ -423,7 +473,6 @@ void ProcessGraph::trigger_layout_refresh() {
             calculate_timeline_layout();
             break;
         case GraphLayoutType::NeuralGraph:
-            // Forces handle dynamic positioning
             break;
     }
     m_layout_needs_recalc = false;
@@ -474,12 +523,10 @@ const GraphNode* ProcessGraph::find_node_by_pid(uint32_t pid) const {
 }
 
 const GraphNode* ProcessGraph::hit_test(const Vec2& world_pos) const {
-    // Check hub
     if (world_pos.distance(m_hub_node.position) <= m_hub_node.radius) {
         return &m_hub_node;
     }
 
-    // Check nodes in reverse order (top-most first)
     for (const auto& [id, node] : m_nodes) {
         if (node.is_filtered_out) continue;
         float hit_rad = std::max(node.radius, 14.0f);
@@ -504,6 +551,31 @@ size_t ProcessGraph::get_active_node_count() const {
         if (!node.is_filtered_out) count++;
     }
     return count;
+}
+
+size_t ProcessGraph::get_verified_edge_count() const {
+    size_t count = 0;
+    for (const auto& e : m_edges) {
+        if (e.is_verified()) count++;
+    }
+    return count;
+}
+
+size_t ProcessGraph::get_inferred_edge_count() const {
+    size_t count = 0;
+    for (const auto& e : m_edges) {
+        if (!e.is_verified()) count++;
+    }
+    return count;
+}
+
+float ProcessGraph::compute_average_node_velocity() const {
+    if (m_nodes.empty()) return 0.0f;
+    float sum_vel = 0.0f;
+    for (const auto& [id, node] : m_nodes) {
+        sum_vel += node.velocity.length();
+    }
+    return sum_vel / m_nodes.size();
 }
 
 } // namespace nerv

@@ -223,8 +223,21 @@ void UIManager::render_inspector(ProcessGraph& graph, Camera& camera, const Hist
             ImGui::TextColored(ImVec4(0.365f, 0.922f, 1.0f, 1.0f), "%s", selected->name.c_str());
             ImGui::TextDisabled("PID: %u | PPID: %u", selected->pid, selected->parent_pid);
 
-            // State Badge
+            // Relationship integrity label
+            const char* rel_label = "Inferred (System Root Grouping)";
+            ImVec4 rel_col = ImVec4(0.365f, 0.922f, 1.0f, 1.0f);
+            for (const auto& e : graph.get_edges()) {
+                if (e.target_id == selected->identity) {
+                    rel_label = e.get_relationship_label();
+                    rel_col = e.is_verified() ? ImVec4(0.604f, 0.482f, 1.0f, 1.0f) : ImVec4(1.0f, 0.749f, 0.412f, 1.0f);
+                    break;
+                }
+            }
+            ImGui::TextDisabled("Link:");
             ImGui::SameLine();
+            ImGui::TextColored(rel_col, "%s", rel_label);
+
+            // State Badge
             if (selected->is_terminating) {
                 ImGui::TextColored(ImVec4(1.0f, 0.396f, 0.478f, 1.0f), "[TERMINATED]");
             } else if (!selected->metrics.is_accessible) {
@@ -538,8 +551,9 @@ void UIManager::render_node_labels(const ProcessGraph& graph, const Camera& came
 
     ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
     float zoom = camera.get_zoom();
+    GraphLOD lod = graph.compute_lod(zoom);
 
-    bool show_all = (m_label_display_mode == 0) && (zoom > 0.65f);
+    bool show_all = (m_label_display_mode == 0) && (lod != GraphLOD::LowDetail);
 
     // Hub label
     const auto& hub = graph.get_hub_node();
@@ -552,11 +566,33 @@ void UIManager::render_node_labels(const ProcessGraph& graph, const Camera& came
     draw_list->AddText(ImVec2(hub_screen.x - hub_text_size.x * 0.5f, hub_screen.y - hub.radius - 20.0f),
                        IM_COL32(93, 235, 255, 255), "SYSTEM CORE");
 
-    // Node labels with glassmorphic pills & activity dots
+    struct ScreenRect { float x1, y1, x2, y2; };
+    std::vector<ScreenRect> occupied_labels;
+    occupied_labels.push_back({hub_min.x, hub_min.y, hub_max.x, hub_max.y});
+
+    // Helper for AABB collision detection
+    auto overlaps = [](const ScreenRect& a, const ScreenRect& b) {
+        return !(a.x2 < b.x1 || a.x1 > b.x2 || a.y2 < b.y1 || a.y1 > b.y2);
+    };
+
+    // Node labels with LOD and screen-space collision culling
     for (const auto& [id, node] : graph.get_nodes()) {
         if (node.is_filtered_out) continue;
 
-        bool should_show = show_all || node.is_selected || node.is_hovered;
+        // Level-of-Detail filtering
+        bool priority_node = node.is_selected || node.is_hovered;
+        bool should_show = false;
+
+        if (priority_node) {
+            should_show = true;
+        } else if (lod == GraphLOD::LowDetail) {
+            should_show = false; // Cull all non-selected/hovered labels when zoomed out
+        } else if (lod == GraphLOD::MediumDetail) {
+            should_show = (node.metrics.cpu_percent > 12.0f);
+        } else {
+            should_show = show_all;
+        }
+
         if (!should_show) continue;
 
         Vec2 screen = camera.world_to_screen(node.position);
@@ -582,6 +618,22 @@ void UIManager::render_node_labels(const ProcessGraph& graph, const Camera& came
 
         ImVec2 pill_min(screen.x - pill_w * 0.5f, screen.y - node.radius - pill_h - 6.0f);
         ImVec2 pill_max(pill_min.x + pill_w, pill_min.y + pill_h);
+
+        ScreenRect candidate_rect{pill_min.x - 4.0f, pill_min.y - 4.0f, pill_max.x + 4.0f, pill_max.y + 4.0f};
+
+        // Collision culling for non-priority labels
+        if (!priority_node) {
+            bool collision = false;
+            for (const auto& occ : occupied_labels) {
+                if (overlaps(candidate_rect, occ)) {
+                    collision = true;
+                    break;
+                }
+            }
+            if (collision) continue; // Skip to prevent unreadable text overlap
+        }
+
+        occupied_labels.push_back(candidate_rect);
 
         // Glassmorphic pill backdrop
         ImU32 bg_col = node.is_selected ? IM_COL32(11, 24, 48, 235) :

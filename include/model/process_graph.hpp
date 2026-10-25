@@ -17,6 +17,18 @@ enum class GraphLayoutType : uint8_t {
     TimelineLayout    // Arranged chronologically by start time
 };
 
+enum class RelationshipType : uint8_t {
+    VerifiedParentChild,  // Direct OS-reported parent-child with valid verified creation order
+    InferredParentExited, // Parent PID was reported, but parent process has already exited
+    InferredSystemRoot    // Process has no reported parent; attached to System Core
+};
+
+enum class GraphLOD : uint8_t {
+    FullDetail,   // Zoom > 1.05: full badges, detailed PID, targeting rings
+    MediumDetail, // 0.45 <= Zoom <= 1.05: key labels (selected, hovered, high CPU)
+    LowDetail     // Zoom < 0.45 or > 600 nodes: culled labels, simplified visuals
+};
+
 struct GraphNode {
     ProcessIdentity identity;
     uint32_t pid{0};
@@ -56,6 +68,21 @@ struct GraphEdge {
     float pulse_speed{1.0f};
     Vec4 color{colors::DeepNavy};
     float alpha{0.4f};
+
+    RelationshipType relationship_type{RelationshipType::VerifiedParentChild};
+
+    bool is_verified() const {
+        return relationship_type == RelationshipType::VerifiedParentChild;
+    }
+
+    const char* get_relationship_label() const {
+        switch (relationship_type) {
+            case RelationshipType::VerifiedParentChild: return "Verified Parent-Child";
+            case RelationshipType::InferredParentExited: return "Inferred (Parent Exited)";
+            case RelationshipType::InferredSystemRoot: return "Inferred (System Root Grouping)";
+        }
+        return "Unknown";
+    }
 };
 
 struct GraphFilter {
@@ -78,6 +105,9 @@ public:
     void set_layout(GraphLayoutType layout);
     GraphLayoutType get_layout() const { return m_current_layout; }
 
+    // Level of Detail
+    GraphLOD compute_lod(float zoom) const;
+
     // Node selection & query
     void select_node(const ProcessIdentity& id);
     void clear_selection();
@@ -98,8 +128,13 @@ public:
 
     size_t get_active_node_count() const;
     size_t get_edge_count() const { return m_edges.size(); }
+    size_t get_verified_edge_count() const;
+    size_t get_inferred_edge_count() const;
 
     void trigger_layout_refresh();
+
+    // Stability verification helper for tests
+    float compute_average_node_velocity() const;
 
 private:
     void apply_neural_layout_step(float dt);
