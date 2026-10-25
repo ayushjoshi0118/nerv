@@ -154,6 +154,12 @@ add_executable(nerv
 target_link_libraries(nerv PRIVATE nerv_core)
 add_dependencies(nerv copy_assets)
 
+# Validation Tool
+add_executable(validate_telemetry
+    tools/validate_telemetry.cpp
+)
+target_link_libraries(validate_telemetry PRIVATE nerv_core)
+
 # Unit & Integration Tests
 file(GLOB_RECURSE TEST_SOURCES
     "tests/*.cpp"
