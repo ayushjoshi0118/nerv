@@ -2,6 +2,7 @@
 #include <vector>
 #include <iostream>
 #include <chrono>
+#include <cstddef>
 
 namespace nerv {
 
@@ -14,156 +15,29 @@ Renderer::~Renderer() {
 bool Renderer::initialize(const std::string& assets_dir) {
     if (m_initialized) return true;
 
-    // Load Shaders with embedded fallbacks in case file loading fails
-    std::string vert_node_fallback = R"(
-        #version 330 core
-        layout (location = 0) in vec2 a_Position;
-        uniform mat4 u_MVP;
-        uniform vec2 u_NodePos;
-        uniform float u_Radius;
-        out vec2 v_UV;
-        void main() {
-            v_UV = a_Position;
-            vec2 world_pos = u_NodePos + a_Position * (u_Radius * 2.2);
-            gl_Position = u_MVP * vec4(world_pos, 0.0, 1.0);
-        }
-    )";
-    std::string frag_node_fallback = R"(
-        #version 330 core
-        in vec2 v_UV;
-        uniform vec4 u_Color;
-        uniform float u_Glow;
-        uniform float u_Alpha;
-        uniform float u_Time;
-        uniform int u_IsSelected;
-        uniform int u_IsHovered;
-        out vec4 FragColor;
-        void main() {
-            float dist = length(v_UV);
-            if (dist > 1.0) discard;
-            float core_radius = 0.45;
-            float core_mask = 1.0 - smoothstep(core_radius - 0.05, core_radius, dist);
-            float glow_falloff = 0.0;
-            if (dist > core_radius) {
-                float norm_d = (dist - core_radius) / (1.0 - core_radius);
-                glow_falloff = exp(-norm_d * 3.2) * u_Glow;
-            }
-            float pulse = 0.95 + 0.08 * sin(u_Time * 4.0 + dist * 5.0);
-            vec3 bright_core = mix(u_Color.rgb, vec3(1.0, 1.0, 1.0), 0.55 * (1.0 - dist / core_radius));
-            vec3 final_rgb = bright_core * core_mask * pulse + u_Color.rgb * glow_falloff;
-            if (u_IsSelected == 1) {
-                float ring = 1.0 - smoothstep(0.0, 0.08, abs(dist - 0.65));
-                final_rgb += vec3(0.365, 0.922, 1.0) * ring * (0.8 + 0.2 * sin(u_Time * 8.0));
-            } else if (u_IsHovered == 1) {
-                float hover_ring = 1.0 - smoothstep(0.0, 0.05, abs(dist - 0.55));
-                final_rgb += vec3(1.0, 1.0, 1.0) * hover_ring * 0.5;
-            }
-            float final_alpha = (core_mask + glow_falloff * 0.7) * u_Alpha;
-            FragColor = vec4(final_rgb, clamp(final_alpha, 0.0, 1.0));
-        }
-    )";
+    // Load Shaders
+    m_shader_mgr.load_program("background", assets_dir + "/shaders/background.vert",
+                              assets_dir + "/shaders/background.frag");
+    m_shader_mgr.load_program("node", assets_dir + "/shaders/node.vert",
+                              assets_dir + "/shaders/node.frag");
+    m_shader_mgr.load_program("edge", assets_dir + "/shaders/edge.vert",
+                              assets_dir + "/shaders/edge.frag");
+    m_shader_mgr.load_program("shockwave", assets_dir + "/shaders/shockwave.vert",
+                              assets_dir + "/shaders/shockwave.frag");
+    m_shader_mgr.load_program("particles", assets_dir + "/shaders/particles.vert",
+                              assets_dir + "/shaders/particles.frag");
+    m_shader_mgr.load_program("bloom_extract", assets_dir + "/shaders/background.vert",
+                              assets_dir + "/shaders/bloom_extract.frag");
+    m_shader_mgr.load_program("blur", assets_dir + "/shaders/background.vert",
+                              assets_dir + "/shaders/blur.frag");
+    m_shader_mgr.load_program("composite", assets_dir + "/shaders/background.vert",
+                              assets_dir + "/shaders/composite.frag");
 
-    std::string vert_edge_fallback = R"(
-        #version 330 core
-        layout (location = 0) in vec2 a_Position;
-        layout (location = 1) in float a_ParamT;
-        uniform mat4 u_MVP;
-        out float v_ParamT;
-        void main() {
-            v_ParamT = a_ParamT;
-            gl_Position = u_MVP * vec4(a_Position, 0.0, 1.0);
-        }
-    )";
-    std::string frag_edge_fallback = R"(
-        #version 330 core
-        in float v_ParamT;
-        uniform vec4 u_Color;
-        uniform float u_Alpha;
-        uniform float u_PulseProgress;
-        uniform float u_Time;
-        out vec4 FragColor;
-        void main() {
-            float base_alpha = u_Alpha * 0.45;
-            float pulse_width = 0.08;
-            float dist_to_pulse = abs(v_ParamT - u_PulseProgress);
-            float packet = 1.0 - smoothstep(0.0, pulse_width, dist_to_pulse);
-            vec3 packet_color = vec3(0.365, 0.922, 1.0);
-            vec3 col = mix(u_Color.rgb, packet_color, packet * 0.9);
-            float alpha = clamp(base_alpha + packet * 0.85, 0.0, 1.0);
-            FragColor = vec4(col, alpha);
-        }
-    )";
-
-    std::string vert_shockwave_fallback = R"(
-        #version 330 core
-        layout (location = 0) in vec2 a_Position;
-        uniform mat4 u_MVP;
-        uniform vec2 u_Center;
-        uniform float u_Radius;
-        out vec2 v_UV;
-        void main() {
-            v_UV = a_Position;
-            vec2 world_pos = u_Center + a_Position * (u_Radius * 1.25);
-            gl_Position = u_MVP * vec4(world_pos, 0.0, 1.0);
-        }
-    )";
-    std::string frag_shockwave_fallback = R"(
-        #version 330 core
-        in vec2 v_UV;
-        uniform vec4 u_Color;
-        uniform float u_Progress;
-        out vec4 FragColor;
-        void main() {
-            float dist = length(v_UV);
-            if (dist > 1.0 || dist < 0.2) discard;
-            float ring_pos = 0.8;
-            float ring_width = 0.22 * (1.0 - u_Progress * 0.4);
-            float ring = 1.0 - smoothstep(0.0, ring_width, abs(dist - ring_pos));
-            float alpha = ring * (1.0 - u_Progress) * 0.85;
-            vec3 wave_col = mix(u_Color.rgb, vec3(1.0, 1.0, 1.0), 0.35 * ring);
-            FragColor = vec4(wave_col, clamp(alpha, 0.0, 1.0));
-        }
-    )";
-
-    std::string vert_part_fallback = R"(
-        #version 330 core
-        layout (location = 0) in vec2 a_Position;
-        layout (location = 1) in float a_Size;
-        layout (location = 2) in float a_Alpha;
-        uniform mat4 u_MVP;
-        out float v_Alpha;
-        void main() {
-            v_Alpha = a_Alpha;
-            gl_PointSize = a_Size;
-            gl_Position = u_MVP * vec4(a_Position, 0.0, 1.0);
-        }
-    )";
-    std::string frag_part_fallback = R"(
-        #version 330 core
-        in float v_Alpha;
-        uniform vec4 u_Color;
-        out vec4 FragColor;
-        void main() {
-            vec2 coord = gl_PointCoord - vec2(0.5);
-            float dist = length(coord);
-            if (dist > 0.5) discard;
-            float soft_circle = 1.0 - smoothstep(0.2, 0.5, dist);
-            FragColor = vec4(u_Color.rgb, u_Color.a * v_Alpha * soft_circle);
-        }
-    )";
-
-    m_shader_mgr.load_program("node", assets_dir + "/shaders/node.vert", assets_dir + "/shaders/node.frag",
-                              vert_node_fallback, frag_node_fallback);
-    m_shader_mgr.load_program("edge", assets_dir + "/shaders/edge.vert", assets_dir + "/shaders/edge.frag",
-                              vert_edge_fallback, frag_edge_fallback);
-    m_shader_mgr.load_program("shockwave", assets_dir + "/shaders/shockwave.vert", assets_dir + "/shaders/shockwave.frag",
-                              vert_shockwave_fallback, frag_shockwave_fallback);
-    m_shader_mgr.load_program("particles", assets_dir + "/shaders/particles.vert", assets_dir + "/shaders/particles.frag",
-                              vert_part_fallback, frag_part_fallback);
-
-    init_quad_buffers();
-    init_line_buffers();
+    init_fullscreen_quad();
+    init_node_instancing_buffers();
+    init_batched_edge_buffers();
     init_particle_buffers();
+    init_bloom_fbos(m_viewport_width, m_viewport_height);
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -176,18 +50,52 @@ bool Renderer::initialize(const std::string& assets_dir) {
 void Renderer::shutdown() {
     if (!m_initialized) return;
 
-    if (m_quad_vao) { glDeleteVertexArrays(1, &m_quad_vao); m_quad_vao = 0; }
-    if (m_quad_vbo) { glDeleteBuffers(1, &m_quad_vbo); m_quad_vbo = 0; }
-    if (m_line_vao) { glDeleteVertexArrays(1, &m_line_vao); m_line_vao = 0; }
-    if (m_line_vbo) { glDeleteBuffers(1, &m_line_vbo); m_line_vbo = 0; }
+    destroy_bloom_fbos();
+
+    if (m_fs_quad_vao) { glDeleteVertexArrays(1, &m_fs_quad_vao); m_fs_quad_vao = 0; }
+    if (m_fs_quad_vbo) { glDeleteBuffers(1, &m_fs_quad_vbo); m_fs_quad_vbo = 0; }
+
+    if (m_node_vao) { glDeleteVertexArrays(1, &m_node_vao); m_node_vao = 0; }
+    if (m_node_quad_vbo) { glDeleteBuffers(1, &m_node_quad_vbo); m_node_quad_vbo = 0; }
+    if (m_node_instance_vbo) { glDeleteBuffers(1, &m_node_instance_vbo); m_node_instance_vbo = 0; }
+
+    if (m_edge_vao) { glDeleteVertexArrays(1, &m_edge_vao); m_edge_vao = 0; }
+    if (m_edge_vbo) { glDeleteBuffers(1, &m_edge_vbo); m_edge_vbo = 0; }
+
+    if (m_shockwave_vao) { glDeleteVertexArrays(1, &m_shockwave_vao); m_shockwave_vao = 0; }
+    if (m_shockwave_vbo) { glDeleteBuffers(1, &m_shockwave_vbo); m_shockwave_vbo = 0; }
+
     if (m_particle_vao) { glDeleteVertexArrays(1, &m_particle_vao); m_particle_vao = 0; }
     if (m_particle_vbo) { glDeleteBuffers(1, &m_particle_vbo); m_particle_vbo = 0; }
 
     m_initialized = false;
 }
 
-void Renderer::init_quad_buffers() {
-    // Two triangles covering [-1, 1] quad
+void Renderer::init_fullscreen_quad() {
+    float fs_quad[] = {
+        -1.0f, -1.0f,
+         1.0f, -1.0f,
+         1.0f,  1.0f,
+        -1.0f, -1.0f,
+         1.0f,  1.0f,
+        -1.0f,  1.0f
+    };
+
+    glGenVertexArrays(1, &m_fs_quad_vao);
+    glGenBuffers(1, &m_fs_quad_vbo);
+
+    glBindVertexArray(m_fs_quad_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_fs_quad_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(fs_quad), fs_quad, GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+
+    glBindVertexArray(0);
+}
+
+void Renderer::init_node_instancing_buffers() {
+    // 1. Quad corner geometry [-1, 1]
     float quad_verts[] = {
         -1.0f, -1.0f,
          1.0f, -1.0f,
@@ -197,34 +105,129 @@ void Renderer::init_quad_buffers() {
         -1.0f,  1.0f
     };
 
-    glGenVertexArrays(1, &m_quad_vao);
-    glGenBuffers(1, &m_quad_vbo);
+    glGenVertexArrays(1, &m_node_vao);
+    glGenBuffers(1, &m_node_quad_vbo);
+    glGenBuffers(1, &m_node_instance_vbo);
 
-    glBindVertexArray(m_quad_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_quad_vbo);
+    glBindVertexArray(m_node_vao);
+
+    // Quad geometry on location 0
+    glBindBuffer(GL_ARRAY_BUFFER, m_node_quad_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad_verts), quad_verts, GL_STATIC_DRAW);
-
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), reinterpret_cast<void*>(0));
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
 
+    // Instanced data on locations 1 to 8
+    glBindBuffer(GL_ARRAY_BUFFER, m_node_instance_vbo);
+    glBufferData(GL_ARRAY_BUFFER, MaxNodeInstances * sizeof(NodeInstanceData), nullptr, GL_DYNAMIC_DRAW);
+
+    size_t stride = sizeof(NodeInstanceData);
+
+    // loc 1: pos (vec2)
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(NodeInstanceData, pos)));
+    glVertexAttribDivisor(1, 1);
+
+    // loc 2: radius (float)
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(NodeInstanceData, radius)));
+    glVertexAttribDivisor(2, 1);
+
+    // loc 3: glow (float)
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(NodeInstanceData, glow)));
+    glVertexAttribDivisor(3, 1);
+
+    // loc 4: color (vec4)
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(NodeInstanceData, color)));
+    glVertexAttribDivisor(4, 1);
+
+    // loc 5: alpha (float)
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(NodeInstanceData, alpha)));
+    glVertexAttribDivisor(5, 1);
+
+    // loc 6: activity (float)
+    glEnableVertexAttribArray(6);
+    glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(NodeInstanceData, activity)));
+    glVertexAttribDivisor(6, 1);
+
+    // loc 7: flags (vec2)
+    glEnableVertexAttribArray(7);
+    glVertexAttribPointer(7, 2, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(NodeInstanceData, flags)));
+    glVertexAttribDivisor(7, 1);
+
+    // loc 8: cpu (float)
+    glEnableVertexAttribArray(8);
+    glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(NodeInstanceData, cpu)));
+    glVertexAttribDivisor(8, 1);
+
+    glBindVertexArray(0);
+
+    // Shockwave buffers
+    glGenVertexArrays(1, &m_shockwave_vao);
+    glGenBuffers(1, &m_shockwave_vbo);
+    glBindVertexArray(m_shockwave_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_shockwave_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad_verts), quad_verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
     glBindVertexArray(0);
 }
 
-void Renderer::init_line_buffers() {
-    glGenVertexArrays(1, &m_line_vao);
-    glGenBuffers(1, &m_line_vbo);
+void Renderer::init_batched_edge_buffers() {
+    glGenVertexArrays(1, &m_edge_vao);
+    glGenBuffers(1, &m_edge_vbo);
 
-    glBindVertexArray(m_line_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_line_vbo);
-    glBufferData(GL_ARRAY_BUFFER, MaxLineVertices * sizeof(float) * 3, nullptr, GL_DYNAMIC_DRAW);
+    glBindVertexArray(m_edge_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_edge_vbo);
+    glBufferData(GL_ARRAY_BUFFER, MaxEdgeVertices * sizeof(EdgeVertex), nullptr, GL_DYNAMIC_DRAW);
 
-    // Attribute 0: position (x, y)
+    size_t stride = sizeof(EdgeVertex);
+
+    // loc 0: pos (vec2)
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float), reinterpret_cast<void*>(0));
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(EdgeVertex, pos)));
 
-    // Attribute 1: paramT (0.0 to 1.0)
+    // loc 1: param_t (float)
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 3 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(EdgeVertex, param_t)));
+
+    // loc 2: param_s (float)
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(EdgeVertex, param_s)));
+
+    // loc 3: color (vec4)
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(EdgeVertex, color)));
+
+    // loc 4: pulse_progress (float)
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(EdgeVertex, pulse_progress)));
+
+    // loc 5: pulse_speed (float)
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(EdgeVertex, pulse_speed)));
+
+    // loc 6: alpha (float)
+    glEnableVertexAttribArray(6);
+    glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(stride),
+                          reinterpret_cast<void*>(offsetof(EdgeVertex, alpha)));
 
     glBindVertexArray(0);
 }
@@ -235,76 +238,122 @@ void Renderer::init_particle_buffers() {
 
     glBindVertexArray(m_particle_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_particle_vbo);
-    glBufferData(GL_ARRAY_BUFFER, 1024 * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, MaxParticles * 5 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
 
-    // Attribute 0: Position (vec2)
+    // loc 0: Position (vec2)
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(0));
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
 
-    // Attribute 1: Size (float)
+    // loc 1: Size (float)
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
 
-    // Attribute 2: Alpha (float)
+    // loc 2: Alpha (float)
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+
+    // loc 3: Depth (float)
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(4 * sizeof(float)));
 
     glBindVertexArray(0);
+}
+
+void Renderer::init_bloom_fbos(int width, int height) {
+    destroy_bloom_fbos();
+
+    // 1. Scene HDR Framebuffer
+    glGenFramebuffers(1, &m_scene_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_scene_fbo);
+
+    glGenTextures(1, &m_scene_color_tex);
+    glBindTexture(GL_TEXTURE_2D, m_scene_color_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_scene_color_tex, 0);
+
+    glGenRenderbuffers(1, &m_scene_rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, m_scene_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_scene_rbo);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // 2. Ping-Pong Blur Framebuffers (Half-Resolution)
+    m_bloom_width = std::max(1, width / 2);
+    m_bloom_height = std::max(1, height / 2);
+
+    glGenFramebuffers(2, m_ping_pong_fbo);
+    glGenTextures(2, m_ping_pong_tex);
+
+    for (int i = 0; i < 2; ++i) {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_ping_pong_fbo[i]);
+        glBindTexture(GL_TEXTURE_2D, m_ping_pong_tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, m_bloom_width, m_bloom_height, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ping_pong_tex[i], 0);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void Renderer::destroy_bloom_fbos() {
+    if (m_scene_fbo) { glDeleteFramebuffers(1, &m_scene_fbo); m_scene_fbo = 0; }
+    if (m_scene_color_tex) { glDeleteTextures(1, &m_scene_color_tex); m_scene_color_tex = 0; }
+    if (m_scene_rbo) { glDeleteRenderbuffers(1, &m_scene_rbo); m_scene_rbo = 0; }
+
+    if (m_ping_pong_fbo[0]) { glDeleteFramebuffers(2, m_ping_pong_fbo); m_ping_pong_fbo[0] = 0; m_ping_pong_fbo[1] = 0; }
+    if (m_ping_pong_tex[0]) { glDeleteTextures(2, m_ping_pong_tex); m_ping_pong_tex[0] = 0; m_ping_pong_tex[1] = 0; }
 }
 
 void Renderer::resize(int width, int height) {
+    if (width <= 0 || height <= 0) return;
     m_viewport_width = width;
     m_viewport_height = height;
-    glViewport(0, 0, width, height);
+    init_bloom_fbos(width, height);
 }
 
-void Renderer::begin_frame() {
-    // Clear to official background black: #05070D
-    const auto& bg = colors::BackgroundBlack;
-    glClearColor(bg.r, bg.g, bg.b, bg.a);
-    glClear(GL_COLOR_BUFFER_BIT);
-}
+void Renderer::begin_frame(const Camera& camera, float total_time) {
+    m_diagnostics.total_draw_calls = 0;
+    m_diagnostics.total_vertices = 0;
 
-void Renderer::end_frame() {
-    // Frame complete
-}
-
-void Renderer::render_background_grid(const Camera& camera) {
-    // Renders subtle orbital rings around center hub
-    auto* shader = m_shader_mgr.get_program("edge");
-    if (!shader) return;
-
-    shader->bind();
-    Mat4 mvp = camera.get_view_projection();
-    shader->set_mat4("u_MVP", mvp);
-    shader->set_vec4("u_Color", Vec4{0.043f, 0.071f, 0.125f, 0.4f}); // Deep navy
-    shader->set_float("u_Alpha", 0.35f);
-    shader->set_float("u_PulseProgress", -1.0f); // No pulse on grid
-
-    std::vector<float> ring_verts;
-    const float radii[] = {120.0f, 240.0f, 380.0f, 540.0f};
-    const int segments = 64;
-
-    for (float r : radii) {
-        for (int i = 0; i <= segments; ++i) {
-            float a1 = (i * 6.2831853f) / segments;
-            float a2 = ((i + 1) * 6.2831853f) / segments;
-
-            ring_verts.push_back(std::cos(a1) * r);
-            ring_verts.push_back(std::sin(a1) * r);
-            ring_verts.push_back(0.0f);
-
-            ring_verts.push_back(std::cos(a2) * r);
-            ring_verts.push_back(std::sin(a2) * r);
-            ring_verts.push_back(1.0f);
-        }
+    if (m_bloom_enabled && m_scene_fbo != 0) {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_scene_fbo);
+        glViewport(0, 0, m_viewport_width, m_viewport_height);
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, m_viewport_width, m_viewport_height);
     }
 
-    glBindVertexArray(m_line_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_line_vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, ring_verts.size() * sizeof(float), ring_verts.data());
-    glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(ring_verts.size() / 3));
+    glClearColor(0.020f, 0.027f, 0.051f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Render Deep Atmospheric Background
+    render_background(camera, total_time);
+}
+
+void Renderer::render_background(const Camera& camera, float total_time) {
+    auto* bg_shader = m_shader_mgr.get_program("background");
+    if (!bg_shader) return;
+
+    bg_shader->bind();
+    bg_shader->set_vec2("u_Resolution", Vec2{static_cast<float>(m_viewport_width), static_cast<float>(m_viewport_height)});
+    bg_shader->set_vec2("u_CameraPos", camera.get_position());
+    bg_shader->set_float("u_CameraZoom", camera.get_zoom());
+    bg_shader->set_float("u_Time", total_time);
+
+    glBindVertexArray(m_fs_quad_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
+
+    m_diagnostics.total_draw_calls++;
+    m_diagnostics.total_vertices += 6;
 }
 
 void Renderer::render_particles(const ParticleSystem& particles, const Camera& camera) {
@@ -315,13 +364,16 @@ void Renderer::render_particles(const ParticleSystem& particles, const Camera& c
     if (!shader) return;
 
     std::vector<float> p_data;
-    p_data.reserve(p_list.size() * 4);
+    p_data.reserve(p_list.size() * 5);
+
+    float zoom = camera.get_zoom();
 
     for (const auto& p : p_list) {
         p_data.push_back(p.position.x);
         p_data.push_back(p.position.y);
-        p_data.push_back(p.size * camera.get_zoom());
+        p_data.push_back(p.size * std::max(0.6f, std::sqrt(zoom)));
         p_data.push_back(p.alpha);
+        p_data.push_back(p.depth_layer);
     }
 
     shader->bind();
@@ -335,6 +387,8 @@ void Renderer::render_particles(const ParticleSystem& particles, const Camera& c
     glBindVertexArray(0);
 
     m_diagnostics.active_particles = p_list.size();
+    m_diagnostics.total_draw_calls++;
+    m_diagnostics.total_vertices += p_list.size();
 }
 
 void Renderer::render_shockwaves(const ShockwaveSystem& shockwaves, const Camera& camera) {
@@ -347,10 +401,8 @@ void Renderer::render_shockwaves(const ShockwaveSystem& shockwaves, const Camera
     shader->bind();
     shader->set_mat4("u_MVP", camera.get_view_projection());
 
-    glBindVertexArray(m_quad_vao);
-
-    // Additive blending for shockwaves
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glBindVertexArray(m_shockwave_vao);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE); // Additive blending for shockwaves
 
     for (const auto& sw : sw_list) {
         shader->set_vec2("u_Center", sw.center);
@@ -359,9 +411,10 @@ void Renderer::render_shockwaves(const ShockwaveSystem& shockwaves, const Camera
         shader->set_float("u_Progress", sw.get_progress());
 
         glDrawArrays(GL_TRIANGLES, 0, 6);
+        m_diagnostics.total_draw_calls++;
+        m_diagnostics.total_vertices += 6;
     }
 
-    // Restore standard alpha blending
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBindVertexArray(0);
 
@@ -370,8 +423,6 @@ void Renderer::render_shockwaves(const ShockwaveSystem& shockwaves, const Camera
 
 void Renderer::render_graph(const ProcessGraph& graph, const Camera& camera, float total_time) {
     auto start_prep = std::chrono::steady_clock::now();
-
-    render_background_grid(camera);
 
     Mat4 mvp = camera.get_view_projection();
     float view_w = camera.get_viewport_width();
@@ -382,13 +433,14 @@ void Renderer::render_graph(const ProcessGraph& graph, const Camera& camera, flo
     float half_w = (view_w * 0.5f) / zoom;
     float half_h = (view_h * 0.5f) / zoom;
 
-    // View frustum bounding box
     float min_x = cam_pos.x - half_w;
     float max_x = cam_pos.x + half_w;
     float min_y = cam_pos.y - half_h;
     float max_y = cam_pos.y + half_h;
 
-    // 1. Render Edges
+    // =========================================================================
+    // 1. GPU BATCHED CONNECTIONS (Single Draw Call Ribbon Geometry!)
+    // =========================================================================
     auto* edge_shader = m_shader_mgr.get_program("edge");
     if (edge_shader) {
         edge_shader->bind();
@@ -396,91 +448,209 @@ void Renderer::render_graph(const ProcessGraph& graph, const Camera& camera, flo
         edge_shader->set_float("u_Time", total_time);
 
         const auto& edges = graph.get_edges();
+        std::vector<EdgeVertex> edge_verts;
+        edge_verts.reserve(edges.size() * 6);
+
         size_t rendered_edges_count = 0;
 
-        glBindVertexArray(m_line_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, m_line_vbo);
-
         for (const auto& edge : edges) {
-            // Frustum check line segment
-            bool in_view = (edge.source_pos.x >= min_x - 50.0f && edge.source_pos.x <= max_x + 50.0f &&
-                            edge.source_pos.y >= min_y - 50.0f && edge.source_pos.y <= max_y + 50.0f) ||
-                           (edge.target_pos.x >= min_x - 50.0f && edge.target_pos.x <= max_x + 50.0f &&
-                            edge.target_pos.y >= min_y - 50.0f && edge.target_pos.y <= max_y + 50.0f);
+            // Viewport Frustum Culling
+            bool in_view = (edge.source_pos.x >= min_x - 60.0f && edge.source_pos.x <= max_x + 60.0f &&
+                            edge.source_pos.y >= min_y - 60.0f && edge.source_pos.y <= max_y + 60.0f) ||
+                           (edge.target_pos.x >= min_x - 60.0f && edge.target_pos.x <= max_x + 60.0f &&
+                            edge.target_pos.y >= min_y - 60.0f && edge.target_pos.y <= max_y + 60.0f);
             if (!in_view) continue;
 
-            float line_verts[] = {
-                edge.source_pos.x, edge.source_pos.y, 0.0f,
-                edge.target_pos.x, edge.target_pos.y, 1.0f
-            };
+            Vec2 dir = edge.target_pos - edge.source_pos;
+            float len = dir.length();
+            if (len < 0.001f) continue;
 
-            edge_shader->set_vec4("u_Color", edge.color);
-            edge_shader->set_float("u_Alpha", edge.alpha);
-            edge_shader->set_float("u_PulseProgress", edge.pulse_progress);
+            Vec2 unit_dir = dir / len;
+            Vec2 normal{-unit_dir.y, unit_dir.x};
 
-            glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(line_verts), line_verts);
-            glDrawArrays(GL_LINES, 0, 2);
+            // Thickness ribbon width
+            float ribbon_w = 3.5f + (edge.pulse_speed * 0.8f);
+
+            Vec2 v0_pos = edge.source_pos + normal * ribbon_w;
+            Vec2 v1_pos = edge.source_pos - normal * ribbon_w;
+            Vec2 v2_pos = edge.target_pos + normal * ribbon_w;
+            Vec2 v3_pos = edge.target_pos - normal * ribbon_w;
+
+            EdgeVertex v0{v0_pos, 0.0f,  1.0f, edge.color, edge.pulse_progress, edge.pulse_speed, edge.alpha};
+            EdgeVertex v1{v1_pos, 0.0f, -1.0f, edge.color, edge.pulse_progress, edge.pulse_speed, edge.alpha};
+            EdgeVertex v2{v2_pos, 1.0f,  1.0f, edge.color, edge.pulse_progress, edge.pulse_speed, edge.alpha};
+            EdgeVertex v3{v3_pos, 1.0f, -1.0f, edge.color, edge.pulse_progress, edge.pulse_speed, edge.alpha};
+
+            // Triangle 1: (v0, v1, v2)
+            edge_verts.push_back(v0);
+            edge_verts.push_back(v1);
+            edge_verts.push_back(v2);
+
+            // Triangle 2: (v2, v1, v3)
+            edge_verts.push_back(v2);
+            edge_verts.push_back(v1);
+            edge_verts.push_back(v3);
+
             rendered_edges_count++;
+            if (edge_verts.size() >= MaxEdgeVertices - 6) break;
         }
 
-        glBindVertexArray(0);
+        if (!edge_verts.empty()) {
+            glBindVertexArray(m_edge_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, m_edge_vbo);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, edge_verts.size() * sizeof(EdgeVertex), edge_verts.data());
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(edge_verts.size()));
+            glBindVertexArray(0);
+
+            m_diagnostics.edge_draw_calls = 1;
+            m_diagnostics.total_draw_calls += 1;
+            m_diagnostics.total_vertices += edge_verts.size();
+        } else {
+            m_diagnostics.edge_draw_calls = 0;
+        }
+
         m_diagnostics.rendered_edges = rendered_edges_count;
     }
 
-    // 2. Render Nodes
+    // =========================================================================
+    // 2. GPU INSTANCED NODES (Single Instanced Draw Call for all nodes!)
+    // =========================================================================
     auto* node_shader = m_shader_mgr.get_program("node");
     if (node_shader) {
         node_shader->bind();
         node_shader->set_mat4("u_MVP", mvp);
         node_shader->set_float("u_Time", total_time);
 
-        glBindVertexArray(m_quad_vao);
+        std::vector<NodeInstanceData> instances;
+        instances.reserve(graph.get_nodes().size() + 1);
 
-        size_t visible_count = 0;
-
-        // Render central System Hub
+        // System Hub Instance
         const auto& hub = graph.get_hub_node();
-        node_shader->set_vec2("u_NodePos", hub.position);
-        node_shader->set_float("u_Radius", hub.radius);
-        node_shader->set_vec4("u_Color", hub.base_color);
-        node_shader->set_float("u_Glow", hub.glow_intensity);
-        node_shader->set_float("u_Alpha", hub.alpha);
-        node_shader->set_int("u_IsSelected", hub.is_selected ? 1 : 0);
-        node_shader->set_int("u_IsHovered", hub.is_hovered ? 1 : 0);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        visible_count++;
+        NodeInstanceData hub_inst;
+        hub_inst.pos = hub.position;
+        hub_inst.radius = hub.radius;
+        hub_inst.glow = hub.glow_intensity;
+        hub_inst.color = hub.base_color;
+        hub_inst.alpha = hub.alpha;
+        hub_inst.activity = hub.metrics.cpu_percent / 50.0f;
+        hub_inst.flags = {hub.is_selected ? 1.0f : 0.0f, hub.is_hovered ? 1.0f : 0.0f};
+        hub_inst.cpu = hub.metrics.cpu_percent;
+        instances.push_back(hub_inst);
 
-        // Render Process Nodes
+        // Process Instances
         const auto& nodes = graph.get_nodes();
         for (const auto& [id, node] : nodes) {
             if (node.is_filtered_out) continue;
 
             // Frustum Culling
-            float r_margin = node.radius * 2.5f;
+            float r_margin = node.radius * 3.0f;
             if (node.position.x + r_margin < min_x || node.position.x - r_margin > max_x ||
                 node.position.y + r_margin < min_y || node.position.y - r_margin > max_y) {
                 continue;
             }
 
-            node_shader->set_vec2("u_NodePos", node.position);
-            node_shader->set_float("u_Radius", node.radius);
-            node_shader->set_vec4("u_Color", node.base_color);
-            node_shader->set_float("u_Glow", node.glow_intensity);
-            node_shader->set_float("u_Alpha", node.alpha);
-            node_shader->set_int("u_IsSelected", node.is_selected ? 1 : 0);
-            node_shader->set_int("u_IsHovered", node.is_hovered ? 1 : 0);
+            NodeInstanceData inst;
+            inst.pos = node.position;
+            inst.radius = node.radius;
+            inst.glow = node.glow_intensity;
+            inst.color = node.base_color;
+            inst.alpha = node.alpha;
+            inst.activity = node.metrics.cpu_percent / 40.0f;
+            inst.flags = {node.is_selected ? 1.0f : 0.0f, node.is_hovered ? 1.0f : 0.0f};
+            inst.cpu = node.metrics.cpu_percent;
 
-            glDrawArrays(GL_TRIANGLES, 0, 6);
-            visible_count++;
+            instances.push_back(inst);
+            if (instances.size() >= MaxNodeInstances) break;
         }
 
-        glBindVertexArray(0);
-        m_diagnostics.visible_nodes = visible_count;
+        if (!instances.empty()) {
+            glBindVertexArray(m_node_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, m_node_instance_vbo);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, instances.size() * sizeof(NodeInstanceData), instances.data());
+
+            // 1 Single Instanced Draw Call!
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, static_cast<GLsizei>(instances.size()));
+            glBindVertexArray(0);
+
+            m_diagnostics.node_draw_calls = 1;
+            m_diagnostics.total_draw_calls += 1;
+            m_diagnostics.total_vertices += instances.size() * 6;
+        } else {
+            m_diagnostics.node_draw_calls = 0;
+        }
+
+        m_diagnostics.visible_nodes = instances.size();
     }
 
     auto end_prep = std::chrono::steady_clock::now();
     m_diagnostics.cpu_prep_time_ms =
         std::chrono::duration<double, std::milli>(end_prep - start_prep).count();
+}
+
+void Renderer::end_frame() {
+    if (m_bloom_enabled && m_scene_fbo != 0) {
+        apply_bloom_and_composite();
+    }
+}
+
+void Renderer::apply_bloom_and_composite() {
+    // 1. Bright-pass Extraction from Scene into Ping-Pong FBO 0
+    glBindFramebuffer(GL_FRAMEBUFFER, m_ping_pong_fbo[0]);
+    glViewport(0, 0, m_bloom_width, m_bloom_height);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    auto* extract_shader = m_shader_mgr.get_program("bloom_extract");
+    if (extract_shader) {
+        extract_shader->bind();
+        extract_shader->set_float("u_Threshold", m_bloom_threshold);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_scene_color_tex);
+        extract_shader->set_int("u_SceneTexture", 0);
+
+        glBindVertexArray(m_fs_quad_vao);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    // 2. Separable Gaussian Blur (Horizontal & Vertical ping-pong passes)
+    auto* blur_shader = m_shader_mgr.get_program("blur");
+    if (blur_shader) {
+        blur_shader->bind();
+        bool horizontal = true;
+        int amount = 6; // 6 blur iterations
+
+        for (int i = 0; i < amount; ++i) {
+            glBindFramebuffer(GL_FRAMEBUFFER, m_ping_pong_fbo[horizontal ? 1 : 0]);
+            blur_shader->set_int("u_Horizontal", horizontal ? 1 : 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m_ping_pong_tex[horizontal ? 0 : 1]);
+            blur_shader->set_int("u_Image", 0);
+
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            horizontal = !horizontal;
+        }
+    }
+
+    // 3. Composite Back to Screen Framebuffer (0)
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, m_viewport_width, m_viewport_height);
+
+    auto* composite_shader = m_shader_mgr.get_program("composite");
+    if (composite_shader) {
+        composite_shader->bind();
+        composite_shader->set_float("u_BloomIntensity", m_bloom_intensity);
+        composite_shader->set_int("u_BloomEnabled", m_bloom_enabled ? 1 : 0);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_scene_color_tex);
+        composite_shader->set_int("u_SceneTexture", 0);
+
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, m_ping_pong_tex[0]);
+        composite_shader->set_int("u_BloomTexture", 1);
+
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
+    }
 }
 
 } // namespace nerv

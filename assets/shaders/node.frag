@@ -1,13 +1,14 @@
 #version 330 core
 
 in vec2 v_UV;
+in vec4 v_Color;
+in float v_Glow;
+in float v_Alpha;
+in float v_Activity;
+in vec2 v_Flags; // x = is_selected, y = is_hovered
+in float v_Cpu;
 
-uniform vec4 u_Color;
-uniform float u_Glow;
-uniform float u_Alpha;
 uniform float u_Time;
-uniform int u_IsSelected;
-uniform int u_IsHovered;
 
 out vec4 FragColor;
 
@@ -17,36 +18,62 @@ void main() {
         discard;
     }
 
-    // Node core boundary is at dist = 0.45
-    float core_radius = 0.45;
-    float core_mask = 1.0 - smoothstep(core_radius - 0.05, core_radius, dist);
+    float core_radius = 0.38;
+    float core_mask = 1.0 - smoothstep(core_radius - 0.04, core_radius, dist);
 
-    // Outer glow halo falloff from core to boundary (0.45 to 1.0)
-    float glow_falloff = 0.0;
-    if (dist > core_radius) {
-        float norm_d = (dist - core_radius) / (1.0 - core_radius);
-        glow_falloff = exp(-norm_d * 3.2) * u_Glow;
+    // 1. Atmospheric Outer Corona (Exponential falloff)
+    float corona = 0.0;
+    if (dist > core_radius * 0.8) {
+        float norm_d = (dist - core_radius * 0.8) / (1.0 - core_radius * 0.8);
+        corona = exp(-norm_d * 3.4) * v_Glow;
     }
 
-    // Subtle breathing pulse inside the core
-    float pulse = 0.95 + 0.08 * sin(u_Time * 4.0 + dist * 5.0);
+    // 2. Membrane Fresnel Rim Light
+    float rim = smoothstep(core_radius - 0.08, core_radius, dist) *
+                (1.0 - smoothstep(core_radius, core_radius + 0.06, dist));
 
-    // Core color is brightened toward white in the center
-    vec3 bright_core = mix(u_Color.rgb, vec3(1.0, 1.0, 1.0), 0.55 * (1.0 - dist / core_radius));
-    vec3 final_rgb = bright_core * core_mask * pulse + u_Color.rgb * glow_falloff;
+    // 3. Hot Bioluminescent Nucleus & CPU Pulse
+    float pulse = 0.94 + 0.08 * sin(u_Time * (4.0 + v_Activity * 8.0) + dist * 5.0);
+    float nucleus = 1.0 - smoothstep(0.0, 0.16, dist);
 
-    // Selection ring
-    if (u_IsSelected == 1) {
-        float ring_radius = 0.65;
-        float ring_thickness = 0.08;
-        float ring = 1.0 - smoothstep(0.0, ring_thickness, abs(dist - ring_radius));
-        float ring_pulse = 0.8 + 0.2 * sin(u_Time * 8.0);
-        final_rgb += vec3(0.365, 0.922, 1.0) * ring * ring_pulse; // Electric cyan selection ring
-    } else if (u_IsHovered == 1) {
-        float hover_ring = 1.0 - smoothstep(0.0, 0.05, abs(dist - 0.55));
-        final_rgb += vec3(1.0, 1.0, 1.0) * hover_ring * 0.5;
+    // Color gradient
+    vec3 bright_core = mix(v_Color.rgb, vec3(1.0, 1.0, 1.0), nucleus * 0.85);
+    vec3 col = bright_core * core_mask * pulse;
+
+    // Add rim light highlight
+    vec3 rim_col = mix(v_Color.rgb, vec3(0.365, 0.922, 1.0), 0.6);
+    col += rim_col * rim * 1.6;
+
+    // Add outer corona
+    col += v_Color.rgb * corona * 0.8;
+
+    // 4. High CPU Plasma Corona Rays (> 40% CPU)
+    if (v_Cpu > 40.0) {
+        float angle = atan(v_UV.y, v_UV.x);
+        float ray_pattern = 0.5 + 0.5 * sin(angle * 8.0 + u_Time * 6.0);
+        float ray_corona = exp(-dist * 4.0) * ray_pattern * ((v_Cpu - 40.0) / 60.0);
+        col += vec3(1.0, 0.4, 0.5) * ray_corona * 1.2;
     }
 
-    float final_alpha = (core_mask + glow_falloff * 0.7) * u_Alpha;
-    FragColor = vec4(final_rgb, clamp(final_alpha, 0.0, 1.0));
+    // 5. Holographic Targeting Reticle (Selected)
+    if (v_Flags.x > 0.5) {
+        // Dual concentric targeting rings
+        float inner_ring = 1.0 - smoothstep(0.0, 0.03, abs(dist - 0.54));
+        float outer_ring = 1.0 - smoothstep(0.0, 0.025, abs(dist - 0.72));
+
+        // Rotating crosshair notches
+        float angle = atan(v_UV.y, v_UV.x) + u_Time * 1.5;
+        float notch = pow(abs(cos(angle * 2.0)), 16.0);
+        float ring_combo = inner_ring + outer_ring * notch;
+
+        vec3 reticle_col = vec3(0.365, 0.922, 1.0); // Electric Cyan
+        col += reticle_col * ring_combo * 1.4;
+    } else if (v_Flags.y > 0.5) {
+        // Hovered subtle focus ring
+        float hover_ring = 1.0 - smoothstep(0.0, 0.035, abs(dist - 0.48));
+        col += vec3(0.604, 0.482, 1.0) * hover_ring * 0.9;
+    }
+
+    float final_alpha = (core_mask + corona * 0.7 + rim * 0.8) * v_Alpha;
+    FragColor = vec4(col, clamp(final_alpha, 0.0, 1.0));
 }

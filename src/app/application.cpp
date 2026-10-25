@@ -169,6 +169,7 @@ void Application::process_input() {
                 // Dragging to pan
                 Vec2 delta = cur_mouse - m_last_mouse_pos;
                 m_camera.pan(delta);
+                m_camera.add_pan_impulse(delta * 0.06f);
                 m_ui_mgr.cancel_following();
                 m_last_mouse_pos = cur_mouse;
             }
@@ -224,11 +225,11 @@ void Application::run() {
         // 2. Update Simulations
         m_graph.update_simulation(delta_time);
         m_camera.update(delta_time);
-        m_particles.update(delta_time, m_camera.get_position());
+        m_particles.update(delta_time, m_camera.get_position(), m_camera.get_velocity());
         m_shockwaves.update(delta_time);
 
         // 3. Render World
-        m_renderer.begin_frame();
+        m_renderer.begin_frame(m_camera, m_total_time);
         m_renderer.render_particles(m_particles, m_camera);
         m_renderer.render_graph(m_graph, m_camera, m_total_time);
         m_renderer.render_shockwaves(m_shockwaves, m_camera);

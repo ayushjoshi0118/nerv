@@ -11,13 +11,14 @@ struct AmbientParticle {
     float size{2.0f};
     float alpha{0.5f};
     float pulse_phase{0.0f};
+    float depth_layer{1.0f}; // 0.3 (deep), 0.7 (mid), 1.2 (near bokeh)
 };
 
 class ParticleSystem {
 public:
-    explicit ParticleSystem(size_t count = 180);
+    explicit ParticleSystem(size_t count = 300);
 
-    void update(float delta_time, const Vec2& center_pos);
+    void update(float delta_time, const Vec2& center_pos, const Vec2& camera_velocity);
     const std::vector<AmbientParticle>& get_particles() const { return m_particles; }
 
     void set_count(size_t count);

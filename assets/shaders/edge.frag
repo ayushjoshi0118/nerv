@@ -1,26 +1,38 @@
 #version 330 core
 
 in float v_ParamT;
+in float v_ParamS;
+in vec4 v_Color;
+in float v_PulseProgress;
+in float v_PulseSpeed;
+in float v_Alpha;
 
-uniform vec4 u_Color;
-uniform float u_Alpha;
-uniform float u_PulseProgress; // 0.0 to 1.0 along line
 uniform float u_Time;
 
 out vec4 FragColor;
 
 void main() {
-    // Base edge alpha
-    float base_alpha = u_Alpha * 0.45;
+    // 1. Exponential cross-filament antialiased core falloff
+    float cross_falloff = exp(-abs(v_ParamS) * 3.5);
 
-    // Moving data pulse packet
-    float pulse_width = 0.08;
-    float dist_to_pulse = abs(v_ParamT - u_PulseProgress);
-    float packet = 1.0 - smoothstep(0.0, pulse_width, dist_to_pulse);
+    // 2. Continuous flowing multi-signal data stream
+    float phase1 = fract(v_ParamT * 2.2 - u_Time * (v_PulseSpeed * 0.8) + v_PulseProgress);
+    float pulse1 = 1.0 - smoothstep(0.0, 0.08, abs(phase1 - 0.5));
 
-    vec3 packet_color = vec3(0.365, 0.922, 1.0); // Electric Cyan
-    vec3 col = mix(u_Color.rgb, packet_color, packet * 0.9);
-    float alpha = clamp(base_alpha + packet * 0.85, 0.0, 1.0);
+    float phase2 = fract(v_ParamT * 1.4 - u_Time * (v_PulseSpeed * 0.5) + v_PulseProgress + 0.33);
+    float pulse2 = 1.0 - smoothstep(0.0, 0.06, abs(phase2 - 0.5));
 
-    FragColor = vec4(col, alpha);
+    float signals = max(pulse1, pulse2);
+
+    // Base filament color
+    vec3 base_col = v_Color.rgb * cross_falloff * 0.75;
+
+    // Glowing signal packet color (Electric Cyan)
+    vec3 signal_col = vec3(0.365, 0.922, 1.0) * signals * cross_falloff * 2.0;
+
+    // Combined color with HDR glow
+    vec3 final_rgb = base_col + signal_col;
+    float final_alpha = (cross_falloff * 0.4 + signals * 0.8) * v_Alpha;
+
+    FragColor = vec4(final_rgb, clamp(final_alpha, 0.0, 1.0));
 }

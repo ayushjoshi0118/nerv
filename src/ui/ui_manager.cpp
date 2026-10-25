@@ -471,8 +471,18 @@ void UIManager::render_settings_modal(TelemetryCollector& collector, Renderer& r
 
         if (ImGui::CollapsingHeader("Visual Effects & Accessibility", ImGuiTreeNodeFlags_DefaultOpen)) {
             bool bloom = renderer.is_bloom_enabled();
-            if (ImGui::Checkbox("Enable Bloom & Shaders Glow", &bloom)) {
+            if (ImGui::Checkbox("Enable Restrained HDR Bloom", &bloom)) {
                 renderer.set_bloom_enabled(bloom);
+            }
+            if (bloom) {
+                float intensity = renderer.get_bloom_intensity();
+                if (ImGui::SliderFloat("Bloom Intensity", &intensity, 0.1f, 2.0f, "%.2f")) {
+                    renderer.set_bloom_intensity(intensity);
+                }
+                float threshold = renderer.get_bloom_threshold();
+                if (ImGui::SliderFloat("Bloom Threshold", &threshold, 0.3f, 0.95f, "%.2f")) {
+                    renderer.set_bloom_threshold(threshold);
+                }
             }
 
             bool reduced = renderer.is_reduced_motion();
@@ -504,10 +514,14 @@ void UIManager::render_settings_modal(TelemetryCollector& collector, Renderer& r
         if (ImGui::CollapsingHeader("Engine Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)) {
             const auto& diag = renderer.get_diagnostics();
             ImGui::Text("Render FPS: %.1f (%.2f ms)", ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
+            ImGui::Text("GPU Draw Calls (Total): %zu", diag.total_draw_calls);
+            ImGui::BulletText("Node Draw Calls: %zu (GPU Instanced)", diag.node_draw_calls);
+            ImGui::BulletText("Edge Draw Calls: %zu (GPU Batched)", diag.edge_draw_calls);
+            ImGui::Text("Total Vertices: %zu", diag.total_vertices);
             ImGui::Text("Visible Nodes: %zu", diag.visible_nodes);
-            ImGui::Text("Rendered Edges: %zu", diag.rendered_edges);
-            ImGui::Text("Active Shockwaves: %zu", diag.active_shockwaves);
+            ImGui::Text("Rendered Connections: %zu", diag.rendered_edges);
             ImGui::Text("Active Particles: %zu", diag.active_particles);
+            ImGui::Text("Active Shockwaves: %zu", diag.active_shockwaves);
             ImGui::Text("Render Prep Duration: %.2f ms", diag.cpu_prep_time_ms);
         }
 
@@ -530,10 +544,15 @@ void UIManager::render_node_labels(const ProcessGraph& graph, const Camera& came
     // Hub label
     const auto& hub = graph.get_hub_node();
     Vec2 hub_screen = camera.world_to_screen(hub.position);
-    draw_list->AddText(ImVec2(hub_screen.x - 30.0f, hub_screen.y - hub.radius - 16.0f),
-                       IM_COL32(93, 235, 255, 220), "SYSTEM CORE");
+    ImVec2 hub_text_size = ImGui::CalcTextSize("SYSTEM CORE");
+    ImVec2 hub_min = ImVec2(hub_screen.x - hub_text_size.x * 0.5f - 8.0f, hub_screen.y - hub.radius - 22.0f);
+    ImVec2 hub_max = ImVec2(hub_screen.x + hub_text_size.x * 0.5f + 8.0f, hub_screen.y - hub.radius - 4.0f);
+    draw_list->AddRectFilled(hub_min, hub_max, IM_COL32(11, 18, 32, 220), 4.0f);
+    draw_list->AddRect(hub_min, hub_max, IM_COL32(93, 235, 255, 120), 4.0f);
+    draw_list->AddText(ImVec2(hub_screen.x - hub_text_size.x * 0.5f, hub_screen.y - hub.radius - 20.0f),
+                       IM_COL32(93, 235, 255, 255), "SYSTEM CORE");
 
-    // Node labels
+    // Node labels with glassmorphic pills & activity dots
     for (const auto& [id, node] : graph.get_nodes()) {
         if (node.is_filtered_out) continue;
 
@@ -543,8 +562,8 @@ void UIManager::render_node_labels(const ProcessGraph& graph, const Camera& came
         Vec2 screen = camera.world_to_screen(node.position);
 
         // Viewport bounds check
-        if (screen.x < -100.0f || screen.x > camera.get_viewport_width() + 100.0f ||
-            screen.y < -100.0f || screen.y > camera.get_viewport_height() + 100.0f) {
+        if (screen.x < -120.0f || screen.x > camera.get_viewport_width() + 120.0f ||
+            screen.y < -120.0f || screen.y > camera.get_viewport_height() + 120.0f) {
             continue;
         }
 
@@ -553,13 +572,43 @@ void UIManager::render_node_labels(const ProcessGraph& graph, const Camera& came
             label += " [" + std::to_string(node.pid) + "]";
         }
 
-        ImU32 text_col = node.is_selected ? IM_COL32(255, 255, 255, 255) :
-                         node.is_hovered  ? IM_COL32(93, 235, 255, 240) :
-                                            IM_COL32(237, 243, 255, 180);
+        ImVec2 text_sz = ImGui::CalcTextSize(label.c_str());
+        float pad_x = 7.0f;
+        float pad_y = 3.0f;
+        float dot_offset = 10.0f;
 
-        float text_width = ImGui::CalcTextSize(label.c_str()).x;
-        draw_list->AddText(ImVec2(screen.x - text_width * 0.5f, screen.y - node.radius - 14.0f),
-                           text_col, label.c_str());
+        float pill_w = text_sz.x + pad_x * 2.0f + dot_offset;
+        float pill_h = text_sz.y + pad_y * 2.0f;
+
+        ImVec2 pill_min(screen.x - pill_w * 0.5f, screen.y - node.radius - pill_h - 6.0f);
+        ImVec2 pill_max(pill_min.x + pill_w, pill_min.y + pill_h);
+
+        // Glassmorphic pill backdrop
+        ImU32 bg_col = node.is_selected ? IM_COL32(11, 24, 48, 235) :
+                       node.is_hovered  ? IM_COL32(16, 28, 54, 225) :
+                                          IM_COL32(8, 14, 26, 205);
+
+        ImU32 border_col = node.is_selected ? IM_COL32(93, 235, 255, 180) :
+                           node.is_hovered  ? IM_COL32(93, 235, 255, 100) :
+                                              IM_COL32(35, 55, 85, 90);
+
+        draw_list->AddRectFilled(pill_min, pill_max, bg_col, 4.0f);
+        draw_list->AddRect(pill_min, pill_max, border_col, 4.0f);
+
+        // Activity indicator dot
+        ImU32 dot_col = (node.metrics.cpu_percent > 70.0f) ? IM_COL32(255, 101, 122, 255) : // Critical red
+                        (node.metrics.cpu_percent > 30.0f) ? IM_COL32(255, 191, 105, 255) : // Warning amber
+                        (!node.metrics.is_accessible)      ? IM_COL32(120, 140, 170, 200) : // Inaccessible dim
+                                                             IM_COL32(99, 245, 176, 255);  // Active green
+
+        draw_list->AddCircleFilled(ImVec2(pill_min.x + pad_x + 3.0f, pill_min.y + pill_h * 0.5f), 3.0f, dot_col);
+
+        // Crisp text
+        ImU32 text_col = node.is_selected ? IM_COL32(255, 255, 255, 255) :
+                         node.is_hovered  ? IM_COL32(93, 235, 255, 245) :
+                                            IM_COL32(237, 243, 255, 200);
+
+        draw_list->AddText(ImVec2(pill_min.x + pad_x + dot_offset, pill_min.y + pad_y), text_col, label.c_str());
     }
 }
 
