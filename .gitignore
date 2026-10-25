@@ -1,12 +1,75 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Build directories
 build/
+build_*/
+bin/
+lib/
 out/
+_deps/
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
+compile_commands.json
+
+# Visual Studio / MSVC files
 .vs/
 *.user
 *.suo
+*.userosscache
+*.sln.docstates
 *.VC.db
-bin/
-lib/
-CMakeUserPresets.json
+*.VC.opendb
+*.vcxproj.user
+Debug/
+Release/
+x64/
+x86/
+
+# IDE & Editor caches
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .cache/
-compile_commands.json
+
+# Runtime / Export files
 imgui.ini
+nerv_telemetry_export.csv
+nerv_telemetry_export.json
+*.log
