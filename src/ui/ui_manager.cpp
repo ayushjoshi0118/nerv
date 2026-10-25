@@ -55,7 +55,7 @@ void UIManager::open_containing_folder(const std::string& path) {
 
 void UIManager::render(ProcessGraph& graph, Camera& camera, HistoryStore& history,
                        EventDetector& event_detector, TelemetryCollector& collector,
-                       Renderer& renderer, float delta_time) {
+                       Renderer& renderer, const ShockwaveSystem& shockwaves, float delta_time) {
     (void)delta_time;
     m_mouse_over_ui = ImGui::GetIO().WantCaptureMouse;
 
@@ -72,7 +72,7 @@ void UIManager::render(ProcessGraph& graph, Camera& camera, HistoryStore& histor
         }
     }
 
-    render_top_bar(graph, camera, collector, snapshot);
+    render_top_bar(graph, camera, collector, event_detector, snapshot);
     if (m_show_inspector) {
         render_inspector(graph, camera, history);
     }
@@ -84,10 +84,11 @@ void UIManager::render(ProcessGraph& graph, Camera& camera, HistoryStore& histor
     }
 
     render_node_labels(graph, camera);
+    render_shockwave_labels(shockwaves, camera);
 }
 
 void UIManager::render_top_bar(ProcessGraph& graph, Camera& camera, TelemetryCollector& collector,
-                               const TelemetrySnapshot& snapshot) {
+                               EventDetector& event_detector, const TelemetrySnapshot& snapshot) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y));
     ImGui::SetNextWindowSize(ImVec2(vp->Size.x, 52.0f));
@@ -159,11 +160,11 @@ void UIManager::render_top_bar(ProcessGraph& graph, Camera& camera, TelemetryCol
         ImGui::SameLine();
 
         // Right side controls
-        float right_width = 460.0f;
+        float right_width = 560.0f;
         ImGui::SetCursorPosX(vp->Size.x - right_width);
 
         // Search Input
-        ImGui::SetNextItemWidth(140.0f);
+        ImGui::SetNextItemWidth(130.0f);
         if (ImGui::InputTextWithHint("##Search", "Search PID/Name", m_search_buffer, sizeof(m_search_buffer))) {
             m_filter.search_query = m_search_buffer;
             graph.set_filter(m_filter);
@@ -173,9 +174,19 @@ void UIManager::render_top_bar(ProcessGraph& graph, Camera& camera, TelemetryCol
         // Layout Dropdown
         const char* layouts[] = {"Neural", "Hierarchy", "Clusters", "Timeline"};
         int cur_layout = static_cast<int>(graph.get_layout());
-        ImGui::SetNextItemWidth(100.0f);
+        ImGui::SetNextItemWidth(90.0f);
         if (ImGui::Combo("##Layout", &cur_layout, layouts, IM_ARRAYSIZE(layouts))) {
             graph.set_layout(static_cast<GraphLayoutType>(cur_layout));
+        }
+        ImGui::SameLine();
+
+        // Visual effects toggle button
+        bool& fx_enabled = event_detector.get_config().enable_visual_effects;
+        if (ImGui::Button(fx_enabled ? "FX: ON" : "FX: OFF")) {
+            fx_enabled = !fx_enabled;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Toggle visual event shockwaves without affecting event detection");
         }
         ImGui::SameLine();
 
@@ -506,12 +517,49 @@ void UIManager::render_settings_modal(TelemetryCollector& collector, Renderer& r
             ImGui::Combo("Node Labels", &m_label_display_mode, "Always Visible\0On Hover / Selection\0Never\0");
         }
 
-        if (ImGui::CollapsingHeader("Shockwave Event Thresholds", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::CollapsingHeader("Event Detection & Visual Effects", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto& cfg = event_detector.get_config();
-            ImGui::SliderFloat("CPU Spike Alert (%)", &cfg.cpu_threshold_percent, 30.0f, 95.0f, "%.1f%%");
+
+            ImGui::Checkbox("Enable Visual Shockwave Effects", &cfg.enable_visual_effects);
+            ImGui::TextDisabled("When disabled, telemetry events are still accurately logged and detected without visual ripples.");
+            ImGui::Separator();
+
+            ImGui::TextColored(ImVec4(0.365f, 0.922f, 1.0f, 1.0f), "Thresholds & Hysteresis");
+            ImGui::SliderFloat("System CPU Alert (%)", &cfg.cpu_threshold_percent, 30.0f, 95.0f, "%.1f%%");
+            ImGui::SliderFloat("System CPU Hysteresis (%)", &cfg.cpu_hysteresis_percent, 1.0f, 20.0f, "%.1f%%");
+            ImGui::TextDisabled("Re-arms after falling below %.1f%%", std::max(0.0f, cfg.cpu_threshold_percent - cfg.cpu_hysteresis_percent));
+
+            ImGui::Spacing();
+            ImGui::SliderFloat("Process CPU Spike (%)", &cfg.process_cpu_spike_percent, 20.0f, 95.0f, "%.1f%%");
+            ImGui::SliderFloat("Process CPU Hysteresis (%)", &cfg.process_cpu_hysteresis_percent, 2.0f, 20.0f, "%.1f%%");
+
+            ImGui::Spacing();
             ImGui::SliderFloat("RAM Usage Alert (%)", &cfg.memory_threshold_percent, 50.0f, 98.0f, "%.1f%%");
-            ImGui::SliderFloat("Disk Spike (MB/s)", &cfg.disk_spike_mb_sec, 5.0f, 200.0f, "%.1f MB/s");
-            ImGui::SliderFloat("Cooldown Time (sec)", reinterpret_cast<float*>(&cfg.cooldown_seconds), 1.0f, 15.0f, "%.1f s");
+            ImGui::SliderFloat("RAM Hysteresis (%)", &cfg.memory_hysteresis_percent, 1.0f, 15.0f, "%.1f%%");
+
+            ImGui::Spacing();
+            ImGui::SliderFloat("Disk Activity Surge (MB/s)", &cfg.disk_spike_mb_sec, 5.0f, 200.0f, "%.1f MB/s");
+            ImGui::SliderFloat("Disk Hysteresis (MB/s)", &cfg.disk_hysteresis_mb_sec, 2.0f, 30.0f, "%.1f MB/s");
+
+            ImGui::Spacing();
+            ImGui::SliderFloat("Network Bandwidth Surge (MB/s)", &cfg.net_spike_mb_sec, 2.0f, 100.0f, "%.1f MB/s");
+            ImGui::SliderFloat("Network Hysteresis (MB/s)", &cfg.net_hysteresis_mb_sec, 1.0f, 20.0f, "%.1f MB/s");
+
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.365f, 0.922f, 1.0f, 1.0f), "Cooldowns & Filtering");
+            float cd = static_cast<float>(cfg.cooldown_seconds);
+            if (ImGui::SliderFloat("System Cooldown (sec)", &cd, 1.0f, 20.0f, "%.1f s")) {
+                cfg.cooldown_seconds = static_cast<double>(cd);
+            }
+            float pcd = static_cast<float>(cfg.process_cooldown_seconds);
+            if (ImGui::SliderFloat("Process Cooldown (sec)", &pcd, 2.0f, 30.0f, "%.1f s")) {
+                cfg.process_cooldown_seconds = static_cast<double>(pcd);
+            }
+
+            ImGui::Checkbox("Detect Process Spawns", &cfg.enable_spawn_events);
+            ImGui::SameLine();
+            ImGui::Checkbox("Detect Process Exits", &cfg.enable_exit_events);
+            ImGui::Checkbox("Detect Per-Process CPU Spikes", &cfg.enable_process_cpu_spikes);
         }
 
         if (ImGui::CollapsingHeader("Data Export", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -661,6 +709,67 @@ void UIManager::render_node_labels(const ProcessGraph& graph, const Camera& came
                                             IM_COL32(237, 243, 255, 200);
 
         draw_list->AddText(ImVec2(pill_min.x + pad_x + dot_offset, pill_min.y + pad_y), text_col, label.c_str());
+    }
+}
+
+void UIManager::render_shockwave_labels(const ShockwaveSystem& shockwaves, const Camera& camera) {
+    const auto& sw_list = shockwaves.get_shockwaves();
+    if (sw_list.empty()) return;
+
+    ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+    float view_w = camera.get_viewport_width();
+    float view_h = camera.get_viewport_height();
+    float zoom = camera.get_zoom();
+
+    for (const auto& sw : sw_list) {
+        if (sw.badge_text.empty()) continue;
+
+        Vec2 sc = camera.world_to_screen(sw.center);
+        if (sc.x < -150.0f || sc.x > view_w + 150.0f || sc.y < -150.0f || sc.y > view_h + 150.0f) {
+            continue;
+        }
+
+        float p = sw.get_progress();
+        float alpha_factor = (1.0f - p * p);
+        if (alpha_factor <= 0.02f) continue;
+
+        // Position: float cleanly above the expanding ripple wavefront with gentle upward drift
+        float ring_radius_screen = sw.current_radius * zoom;
+        float drift = p * 34.0f;
+        float y_pos = sc.y - (ring_radius_screen * 0.42f) - 20.0f - drift;
+        float x_pos = sc.x;
+
+        ImVec2 text_sz = ImGui::CalcTextSize(sw.badge_text.c_str());
+        float pad_x = 10.0f;
+        float pad_y = 5.0f;
+        float pill_w = text_sz.x + pad_x * 2.0f + 14.0f;
+        float pill_h = text_sz.y + pad_y * 2.0f;
+
+        ImVec2 pill_min(x_pos - pill_w * 0.5f, y_pos - pill_h * 0.5f);
+        ImVec2 pill_max(pill_min.x + pill_w, pill_min.y + pill_h);
+
+        int alpha_bg = static_cast<int>(alpha_factor * 235.0f);
+        int alpha_border = static_cast<int>(alpha_factor * 255.0f);
+        int alpha_text = static_cast<int>(alpha_factor * 255.0f);
+
+        ImU32 bg_col = IM_COL32(11, 18, 32, alpha_bg);
+
+        // Border and accent color based on severity
+        ImU32 border_col = (sw.severity == EventSeverity::Critical) ? IM_COL32(255, 101, 122, alpha_border) :
+                           (sw.severity == EventSeverity::Warning)  ? IM_COL32(255, 191, 105, alpha_border) :
+                                                                      IM_COL32(93, 235, 255, alpha_border);
+
+        // Render rounded frosted capsule badge (non-interactive, zero mouse interception)
+        draw_list->AddRectFilled(pill_min, pill_max, bg_col, 8.0f);
+        draw_list->AddRect(pill_min, pill_max, border_col, 8.0f, 0, 1.5f);
+
+        // Glowing indicator dot
+        ImVec2 dot_pos(pill_min.x + pad_x + 3.0f, y_pos);
+        draw_list->AddCircleFilled(dot_pos, 3.5f, border_col);
+
+        // Crisp measurement label text displaying genuine metric measurement
+        ImVec2 text_pos(pill_min.x + pad_x + 12.0f, pill_min.y + pad_y);
+        draw_list->AddText(text_pos, IM_COL32(237, 243, 255, alpha_text), sw.badge_text.c_str());
     }
 }
 

@@ -15,6 +15,7 @@ enum class EventSeverity : uint8_t {
 
 enum class EventType : uint8_t {
     CpuSpike,
+    ProcessCpuSpike,
     MemoryHigh,
     DiskSpike,
     NetworkSpike,
@@ -28,6 +29,7 @@ struct SystemEvent {
     EventSeverity severity{EventSeverity::Info};
     std::string title;
     std::string description;
+    std::string badge_text; // Short formatted text for in-world shockwave badge
     float measured_value{0.0f};
     float threshold_value{0.0f};
     std::string unit;
@@ -35,6 +37,19 @@ struct SystemEvent {
     ProcessIdentity related_process;
     Vec2 world_position{0.0f, 0.0f}; // Position in graph world coordinates for shockwaves
     std::chrono::system_clock::time_point timestamp;
+
+    static const char* event_type_to_string(EventType t) {
+        switch (t) {
+            case EventType::CpuSpike: return "System CPU Spike";
+            case EventType::ProcessCpuSpike: return "Process CPU Spike";
+            case EventType::MemoryHigh: return "Memory Pressure";
+            case EventType::DiskSpike: return "Disk Activity Surge";
+            case EventType::NetworkSpike: return "Network Bandwidth Surge";
+            case EventType::ProcessSpawned: return "Process Spawned";
+            case EventType::ProcessTerminated: return "Process Terminated";
+        }
+        return "Unknown Event";
+    }
 
     static const char* severity_to_string(EventSeverity s) {
         switch (s) {

@@ -207,18 +207,29 @@ void Application::run() {
             m_graph.update_from_snapshot(*snapshot);
             m_history.record_snapshot(*snapshot);
 
-            // Check events and trigger signature shockwaves!
+            // Check events and trigger signature shockwaves with genuine measurements
             auto events = m_event_detector.update(*snapshot);
-            for (const auto& ev : events) {
-                Vec2 shock_pos{0.0f, 0.0f};
-                if (ev.related_process.pid != 0) {
-                    const auto* node = m_graph.get_node_by_identity(ev.related_process);
-                    if (node) shock_pos = node->position;
-                }
 
-                Vec4 shock_col = SystemEvent::severity_to_color(ev.severity);
-                float radius = (ev.severity == EventSeverity::Critical) ? 380.0f : 240.0f;
-                m_shockwaves.trigger(shock_pos, shock_col, radius, 1.4f);
+            // Trigger visual shockwave animations only if visual effects are enabled
+            if (m_event_detector.get_config().enable_visual_effects) {
+                for (const auto& ev : events) {
+                    Vec2 shock_pos = m_graph.get_hub_node().position;
+                    if (ev.related_process.pid != 0) {
+                        const auto* node = m_graph.get_node_by_identity(ev.related_process);
+                        if (node) {
+                            shock_pos = node->position;
+                        }
+                    }
+
+                    Vec4 shock_col = SystemEvent::severity_to_color(ev.severity);
+                    float radius = (ev.severity == EventSeverity::Critical) ? 380.0f :
+                                   (ev.severity == EventSeverity::Warning)  ? 280.0f : 200.0f;
+                    float lifetime = (ev.severity == EventSeverity::Critical) ? 1.6f : 1.3f;
+
+                    m_shockwaves.trigger(shock_pos, shock_col, radius, lifetime,
+                                         ev.badge_text, ev.title, ev.severity, ev.type,
+                                         ev.measured_value, ev.unit, ev.id);
+                }
             }
         }
 
@@ -241,7 +252,7 @@ void Application::run() {
         ImGui::NewFrame();
 
         m_ui_mgr.render(m_graph, m_camera, m_history, m_event_detector,
-                        *m_collector, m_renderer, delta_time);
+                        *m_collector, m_renderer, m_shockwaves, delta_time);
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

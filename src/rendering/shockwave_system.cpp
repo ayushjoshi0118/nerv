@@ -3,7 +3,11 @@
 
 namespace nerv {
 
-void ShockwaveSystem::trigger(const Vec2& center, const Vec4& color, float max_radius, float lifetime) {
+void ShockwaveSystem::trigger(const Vec2& center, const Vec4& color, float max_radius, float lifetime,
+                              const std::string& badge_text, const std::string& secondary_text,
+                              EventSeverity severity, EventType event_type,
+                              float measured_value, const std::string& unit,
+                              uint64_t event_id) {
     ActiveShockwave sw;
     sw.center = center;
     sw.current_radius = 0.0f;
@@ -11,6 +15,13 @@ void ShockwaveSystem::trigger(const Vec2& center, const Vec4& color, float max_r
     sw.lifetime = lifetime;
     sw.elapsed = 0.0f;
     sw.color = color;
+    sw.badge_text = badge_text;
+    sw.secondary_text = secondary_text;
+    sw.severity = severity;
+    sw.event_type = event_type;
+    sw.measured_value = measured_value;
+    sw.unit = unit;
+    sw.event_id = event_id;
 
     m_shockwaves.push_back(sw);
 }

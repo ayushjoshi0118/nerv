@@ -3,6 +3,7 @@
 #include "model/process_graph.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/shockwave_system.hpp"
 #include "history/history_store.hpp"
 #include "events/event_detector.hpp"
 #include "telemetry/telemetry_collector.hpp"
@@ -17,7 +18,7 @@ public:
     void initialize();
     void render(ProcessGraph& graph, Camera& camera, HistoryStore& history,
                 EventDetector& event_detector, TelemetryCollector& collector,
-                Renderer& renderer, float delta_time);
+                Renderer& renderer, const ShockwaveSystem& shockwaves, float delta_time);
 
     bool is_mouse_over_ui() const { return m_mouse_over_ui; }
     bool is_following_process() const { return m_follow_selected; }
@@ -25,13 +26,14 @@ public:
 
 private:
     void render_top_bar(ProcessGraph& graph, Camera& camera, TelemetryCollector& collector,
-                        const TelemetrySnapshot& snapshot);
+                        EventDetector& event_detector, const TelemetrySnapshot& snapshot);
     void render_inspector(ProcessGraph& graph, Camera& camera, const HistoryStore& history);
     void render_bottom_panel(ProcessGraph& graph, Camera& camera, const HistoryStore& history,
                              EventDetector& event_detector);
     void render_settings_modal(TelemetryCollector& collector, Renderer& renderer,
                                EventDetector& event_detector, const HistoryStore& history);
     void render_node_labels(const ProcessGraph& graph, const Camera& camera);
+    void render_shockwave_labels(const ShockwaveSystem& shockwaves, const Camera& camera);
 
     static std::string format_bytes(uint64_t bytes);
     static std::string format_throughput(uint64_t bytes_sec);
