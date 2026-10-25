@@ -8,6 +8,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Windows and global definitions
 add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+if(ENABLE_ASAN)
+    if(MSVC)
+        add_compile_options(/fsanitize=address)
+    else()
+        add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=address)
+    endif()
+endif()
+
 if(MSVC)
     add_compile_options(/W4 /permissive- /utf-8 /EHsc /MP)
 else()
