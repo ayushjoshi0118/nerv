@@ -74,7 +74,7 @@ void UIManager::render(ProcessGraph& graph, Camera& camera, HistoryStore& histor
 
     render_top_bar(graph, camera, collector, event_detector, snapshot);
     if (m_show_inspector) {
-        render_inspector(graph, camera, history);
+        render_inspector(graph, camera, history, event_detector, snapshot, delta_time);
     }
     if (m_show_bottom_panel) {
         render_bottom_panel(graph, camera, history, event_detector);
@@ -214,9 +214,11 @@ void UIManager::render_top_bar(ProcessGraph& graph, Camera& camera, TelemetryCol
     ImGui::PopStyleVar();
 }
 
-void UIManager::render_inspector(ProcessGraph& graph, Camera& camera, const HistoryStore& history) {
+void UIManager::render_inspector(ProcessGraph& graph, Camera& camera, const HistoryStore& history,
+                                  const EventDetector& event_detector, const TelemetrySnapshot& snapshot,
+                                  float delta_time) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float panel_w = 340.0f;
+    float panel_w = 370.0f;
     float top_h = 52.0f;
     float bottom_h = m_show_bottom_panel ? 200.0f : 0.0f;
     float panel_h = vp->Size.y - top_h - bottom_h;
@@ -229,26 +231,66 @@ void UIManager::render_inspector(ProcessGraph& graph, Camera& camera, const Hist
     if (ImGui::Begin("PROCESS INSPECTOR", &m_show_inspector, flags)) {
         const GraphNode* selected = graph.get_selected_node();
 
-        if (selected) {
-            // Header: Name & PID
-            ImGui::TextColored(ImVec4(0.365f, 0.922f, 1.0f, 1.0f), "%s", selected->name.c_str());
-            ImGui::TextDisabled("PID: %u | PPID: %u", selected->pid, selected->parent_pid);
+        // 1. Stale Telemetry Notification Banner
+        if (snapshot.is_stale(3.0)) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.749f, 0.412f, 1.0f));
+            ImGui::Text("⚠ WARNING: STALE TELEMETRY");
+            ImGui::PopStyleColor();
+            ImGui::TextDisabled("Snapshot age: %.1fs (Collection delayed)", snapshot.age_seconds());
+            ImGui::Separator();
+        }
 
-            // Relationship integrity label
+        // 2. Copy Feedback Toast
+        if (m_copy_feedback_timer > 0.0f) {
+            m_copy_feedback_timer -= delta_time;
+            ImGui::TextColored(ImVec4(0.388f, 0.961f, 0.690f, 1.0f), "✓ %s", m_copy_feedback_text.c_str());
+            ImGui::Separator();
+        }
+
+        if (selected) {
+            // 3. Process Exit / Termination Banner
+            if (selected->is_terminating) {
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.24f, 0.06f, 0.09f, 0.75f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 0.396f, 0.478f, 0.9f));
+                ImGui::BeginChild("##TerminatedBanner", ImVec2(0.0f, 54.0f), true);
+                ImGui::TextColored(ImVec4(1.0f, 0.396f, 0.478f, 1.0f), "✖ PROCESS TERMINATED / EXITED");
+                ImGui::TextDisabled("Process exited while inspected. Final state & history preserved.");
+                ImGui::EndChild();
+                ImGui::PopStyleColor(2);
+                ImGui::Spacing();
+            }
+
+            // Header: Name & Identity
+            ImGui::TextColored(ImVec4(0.365f, 0.922f, 1.0f, 1.0f), "%s", selected->name.c_str());
+
+            // Relationship & Parent PID
             const char* rel_label = "Inferred (System Root Grouping)";
             ImVec4 rel_col = ImVec4(0.365f, 0.922f, 1.0f, 1.0f);
+            bool is_verified = false;
             for (const auto& e : graph.get_edges()) {
                 if (e.target_id == selected->identity) {
                     rel_label = e.get_relationship_label();
-                    rel_col = e.is_verified() ? ImVec4(0.604f, 0.482f, 1.0f, 1.0f) : ImVec4(1.0f, 0.749f, 0.412f, 1.0f);
+                    is_verified = e.is_verified();
+                    rel_col = is_verified ? ImVec4(0.604f, 0.482f, 1.0f, 1.0f) : ImVec4(1.0f, 0.749f, 0.412f, 1.0f);
                     break;
                 }
             }
+
+            if (selected->parent_pid != 0) {
+                if (!is_verified && !selected->is_terminating) {
+                    ImGui::TextDisabled("PID: %u | PPID: %u [Parent Exited]", selected->pid, selected->parent_pid);
+                } else {
+                    ImGui::TextDisabled("PID: %u | PPID: %u", selected->pid, selected->parent_pid);
+                }
+            } else {
+                ImGui::TextDisabled("PID: %u | PPID: [None / System Root]", selected->pid);
+            }
+
             ImGui::TextDisabled("Link:");
             ImGui::SameLine();
             ImGui::TextColored(rel_col, "%s", rel_label);
 
-            // State Badge
+            // State & Category Badges
             if (selected->is_terminating) {
                 ImGui::TextColored(ImVec4(1.0f, 0.396f, 0.478f, 1.0f), "[TERMINATED]");
             } else if (!selected->metrics.is_accessible) {
@@ -256,83 +298,201 @@ void UIManager::render_inspector(ProcessGraph& graph, Camera& camera, const Hist
             } else {
                 ImGui::TextColored(ImVec4(0.388f, 0.961f, 0.690f, 1.0f), "[ACTIVE]");
             }
+            ImGui::SameLine();
+            ImGui::TextDisabled("| Category: %s", ProcessMetrics::category_to_string(selected->metrics.category));
 
             ImGui::Separator();
 
-            // CPU Metric & Sparkline
-            ImGui::Text("CPU Usage:");
+            // Quick Navigation & Control Toolbar
+            if (ImGui::Button("Focus")) {
+                camera.focus_on(selected->position, 1.8f);
+            }
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.365f, 0.922f, 1.0f, 1.0f), "%.2f%%", selected->metrics.cpu_percent);
+
+            if (selected->is_terminating) {
+                ImGui::BeginDisabled();
+                ImGui::Button("Follow (Exited)");
+                ImGui::EndDisabled();
+            } else {
+                if (m_follow_selected) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.45f, 0.38f, 0.9f));
+                    if (ImGui::Button("Unfollow")) {
+                        m_follow_selected = false;
+                    }
+                    ImGui::PopStyleColor();
+                } else {
+                    if (ImGui::Button("Follow")) {
+                        m_follow_selected = true;
+                    }
+                }
+            }
+            ImGui::SameLine();
+
+            if (selected->is_pinned) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.38f, 0.60f, 0.9f));
+                if (ImGui::Button("Unpin")) {
+                    auto* mut_node = graph.get_node_by_identity(selected->identity);
+                    if (mut_node) mut_node->is_pinned = false;
+                }
+                ImGui::PopStyleColor();
+            } else {
+                if (ImGui::Button("Pin")) {
+                    auto* mut_node = graph.get_node_by_identity(selected->identity);
+                    if (mut_node) mut_node->is_pinned = true;
+                }
+            }
+            ImGui::SameLine();
+
+            if (ImGui::Button("Deselect")) {
+                graph.clear_selection();
+                m_follow_selected = false;
+            }
+
+            ImGui::Separator();
+
+            // CPU Usage & Bounded History Statistics
+            ImGui::Text("CPU Utilization:");
+            ImGui::SameLine();
+            ImVec4 cpu_val_col = (selected->metrics.cpu_percent > 70.0f) ? ImVec4(1.0f, 0.396f, 0.478f, 1.0f) :
+                                 (selected->metrics.cpu_percent > 30.0f) ? ImVec4(1.0f, 0.749f, 0.412f, 1.0f) :
+                                                                           ImVec4(0.365f, 0.922f, 1.0f, 1.0f);
+            ImGui::TextColored(cpu_val_col, "%.2f%%", selected->metrics.cpu_percent);
 
             const auto* cpu_hist = history.get_process_cpu_history(selected->identity);
             if (cpu_hist && !cpu_hist->empty()) {
                 auto vals = cpu_hist->to_vector();
+                float min_c = vals[0], max_c = vals[0], sum_c = 0.0f;
+                for (float v : vals) {
+                    min_c = std::min(min_c, v);
+                    max_c = std::max(max_c, v);
+                    sum_c += v;
+                }
+                float avg_c = sum_c / vals.size();
+
                 ImGui::PlotLines("##ProcCPU", vals.data(), static_cast<int>(vals.size()), 0,
-                                 nullptr, 0.0f, 100.0f, ImVec2(panel_w - 30.0f, 45.0f));
-            }
-
-            // RAM Metric & Sparkline
-            float ram_mb = static_cast<float>(selected->metrics.resident_memory_bytes) / (1024.0f * 1024.0f);
-            float virt_mb = static_cast<float>(selected->metrics.virtual_memory_bytes) / (1024.0f * 1024.0f);
-            ImGui::Text("Resident RAM (Working Set):");
-            ImGui::TextColored(ImVec4(0.388f, 0.961f, 0.690f, 1.0f), "%.1f MB (%s)",
-                               ram_mb, format_bytes(selected->metrics.resident_memory_bytes).c_str());
-            ImGui::TextDisabled("Commit / Virtual: %.1f MB", virt_mb);
-
-            const auto* ram_hist = history.get_process_ram_history(selected->identity);
-            if (ram_hist && !ram_hist->empty()) {
-                auto vals = ram_hist->to_vector();
-                ImGui::PlotLines("##ProcRAM", vals.data(), static_cast<int>(vals.size()), 0,
-                                 nullptr, 0.0f, ram_mb * 1.5f + 10.0f, ImVec2(panel_w - 30.0f, 45.0f));
-            }
-
-            ImGui::Separator();
-
-            // I/O & Threads
-            ImGui::Text("Threads: %u", selected->metrics.thread_count);
-            ImGui::Text("Disk Read: %s", format_throughput(selected->metrics.disk_read_bytes_sec).c_str());
-            ImGui::Text("Disk Write: %s", format_throughput(selected->metrics.disk_write_bytes_sec).c_str());
-            ImGui::TextDisabled("Category: %s", ProcessMetrics::category_to_string(selected->metrics.category));
-
-            ImGui::Separator();
-
-            // Executable Path
-            ImGui::TextDisabled("Executable Path:");
-            if (!selected->metrics.exe_path.empty()) {
-                ImGui::TextWrapped("%s", selected->metrics.exe_path.c_str());
-            } else {
-                ImGui::TextDisabled("(Access denied or system process)");
+                                 nullptr, 0.0f, std::max(50.0f, max_c * 1.2f), ImVec2(panel_w - 30.0f, 42.0f));
+                ImGui::TextDisabled("Min: %.1f%% | Max: %.1f%% | Avg: %.1f%% (%zu samples)", min_c, max_c, avg_c, vals.size());
             }
 
             ImGui::Spacing();
 
-            // Actions
-            if (ImGui::Button("Focus Node")) {
-                camera.focus_on(selected->position, 1.8f);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(m_follow_selected ? "Unfollow" : "Follow")) {
-                m_follow_selected = !m_follow_selected;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(selected->is_pinned ? "Unpin" : "Pin")) {
-                auto* mut_node = graph.get_node_by_identity(selected->identity);
-                if (mut_node) mut_node->is_pinned = !mut_node->is_pinned;
+            // RAM Metric & Bounded History Statistics
+            float ram_mb = static_cast<float>(selected->metrics.resident_memory_bytes) / (1024.0f * 1024.0f);
+            float virt_mb = static_cast<float>(selected->metrics.virtual_memory_bytes) / (1024.0f * 1024.0f);
+            ImGui::Text("Resident Memory (Working Set):");
+            ImGui::TextColored(ImVec4(0.388f, 0.961f, 0.690f, 1.0f), "%.1f MB (%s)",
+                               ram_mb, format_bytes(selected->metrics.resident_memory_bytes).c_str());
+
+            if (selected->metrics.is_accessible && selected->metrics.virtual_memory_bytes > 0) {
+                ImGui::TextDisabled("Commit / Virtual: %.1f MB", virt_mb);
+            } else {
+                ImGui::TextDisabled("Commit / Virtual: [INACCESSIBLE / NOT REPORTED]");
             }
 
+            const auto* ram_hist = history.get_process_ram_history(selected->identity);
+            if (ram_hist && !ram_hist->empty()) {
+                auto vals = ram_hist->to_vector();
+                float min_r = vals[0], max_r = vals[0], sum_r = 0.0f;
+                for (float v : vals) {
+                    min_r = std::min(min_r, v);
+                    max_r = std::max(max_r, v);
+                    sum_r += v;
+                }
+                float avg_r = sum_r / vals.size();
+
+                ImGui::PlotLines("##ProcRAM", vals.data(), static_cast<int>(vals.size()), 0,
+                                 nullptr, 0.0f, std::max(10.0f, max_r * 1.15f), ImVec2(panel_w - 30.0f, 42.0f));
+                ImGui::TextDisabled("Min: %.1f MB | Max: %.1f MB | Avg: %.1f MB", min_r, max_r, avg_r);
+            }
+
+            ImGui::Separator();
+
+            // Threads & I/O Attribution
+            if (selected->metrics.is_accessible) {
+                ImGui::Text("Threads: %u", selected->metrics.thread_count);
+                ImGui::Text("Disk Read: %s", format_throughput(selected->metrics.disk_read_bytes_sec).c_str());
+                ImGui::Text("Disk Write: %s", format_throughput(selected->metrics.disk_write_bytes_sec).c_str());
+            } else {
+                ImGui::TextDisabled("Threads: [INACCESSIBLE / PROTECTED]");
+                ImGui::TextDisabled("Disk I/O: [INACCESSIBLE / PROTECTED]");
+            }
+
+            ImGui::Separator();
+
+            // Executable Path Metadata
+            ImGui::TextDisabled("Executable Path:");
             if (!selected->metrics.exe_path.empty()) {
-                if (ImGui::Button("Open Containing Folder")) {
+                ImGui::TextWrapped("%s", selected->metrics.exe_path.c_str());
+                if (ImGui::Button("Open Folder")) {
                     open_containing_folder(selected->metrics.exe_path);
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Copy Path")) {
                     ImGui::SetClipboardText(selected->metrics.exe_path.c_str());
+                    m_copy_feedback_timer = 2.0f;
+                    m_copy_feedback_text = "Executable path copied!";
                 }
+            } else {
+                ImGui::TextDisabled("[INACCESSIBLE / ELEVATED SYSTEM PROCESS]");
             }
 
-            if (ImGui::Button("Clear Selection")) {
-                graph.clear_selection();
-                m_follow_selected = false;
+            ImGui::Separator();
+
+            // Copy Process Details (JSON Diagnostics)
+            if (ImGui::Button("Copy Process Details (JSON)")) {
+                std::stringstream js;
+                js << "{\n"
+                   << "  \"pid\": " << selected->pid << ",\n"
+                   << "  \"parent_pid\": " << selected->parent_pid << ",\n"
+                   << "  \"name\": \"" << selected->name << "\",\n"
+                   << "  \"status\": \"" << (selected->is_terminating ? "Terminated" : selected->metrics.is_accessible ? "Active" : "Protected") << "\",\n"
+                   << "  \"relationship\": \"" << rel_label << "\",\n"
+                   << "  \"cpu_percent\": " << selected->metrics.cpu_percent << ",\n"
+                   << "  \"resident_memory_bytes\": " << selected->metrics.resident_memory_bytes << ",\n"
+                   << "  \"resident_memory_mb\": " << ram_mb << ",\n"
+                   << "  \"virtual_memory_bytes\": " << selected->metrics.virtual_memory_bytes << ",\n"
+                   << "  \"thread_count\": " << selected->metrics.thread_count << ",\n"
+                   << "  \"category\": \"" << ProcessMetrics::category_to_string(selected->metrics.category) << "\",\n"
+                   << "  \"executable_path\": \"" << selected->metrics.exe_path << "\",\n"
+                   << "  \"disk_read_bytes_sec\": " << selected->metrics.disk_read_bytes_sec << ",\n"
+                   << "  \"disk_write_bytes_sec\": " << selected->metrics.disk_write_bytes_sec << ",\n"
+                   << "  \"is_accessible\": " << (selected->metrics.is_accessible ? "true" : "false") << "\n"
+                   << "}";
+                ImGui::SetClipboardText(js.str().c_str());
+                m_copy_feedback_timer = 2.5f;
+                m_copy_feedback_text = "Process details copied to clipboard!";
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Copy PID")) {
+                ImGui::SetClipboardText(std::to_string(selected->pid).c_str());
+                m_copy_feedback_timer = 2.0f;
+                m_copy_feedback_text = "PID copied!";
+            }
+
+            ImGui::Separator();
+
+            // Recent Events for this Specific Process
+            if (ImGui::CollapsingHeader("Recent Process Events", ImGuiTreeNodeFlags_DefaultOpen)) {
+                size_t matching_events = 0;
+                const auto& log = event_detector.get_event_log();
+
+                for (const auto& ev : log) {
+                    if (ev.related_process == selected->identity ||
+                        (ev.related_process.pid == selected->pid && ev.related_process.pid != 0)) {
+                        matching_events++;
+                        ImVec4 sev_col = (ev.severity == EventSeverity::Critical) ? ImVec4(1.0f, 0.396f, 0.478f, 1.0f) :
+                                         (ev.severity == EventSeverity::Warning)  ? ImVec4(1.0f, 0.749f, 0.412f, 1.0f) :
+                                                                                    ImVec4(0.365f, 0.922f, 1.0f, 1.0f);
+                        ImGui::TextColored(sev_col, "[%s]", SystemEvent::severity_to_string(ev.severity));
+                        ImGui::SameLine();
+                        ImGui::Text("%s", ev.title.c_str());
+                        ImGui::TextDisabled("  %s", ev.description.c_str());
+                    }
+                }
+
+                if (matching_events == 0) {
+                    ImGui::TextDisabled("No anomalous spikes or lifecycle events for this process.");
+                }
             }
         } else {
             // No process selected: Show Central System Hub Info

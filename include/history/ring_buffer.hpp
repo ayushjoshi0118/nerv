@@ -51,6 +51,10 @@ public:
         return m_data[start];
     }
 
+    // Container standard aliases
+    const T& back() const { return newest(); }
+    const T& front() const { return oldest(); }
+
     // Export sequential copy for rendering (e.g. ImGui PlotLines)
     std::vector<T> to_vector() const {
         std::vector<T> result;

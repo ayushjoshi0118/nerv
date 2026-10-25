@@ -23,11 +23,15 @@ public:
     bool is_mouse_over_ui() const { return m_mouse_over_ui; }
     bool is_following_process() const { return m_follow_selected; }
     void cancel_following() { m_follow_selected = false; }
+    void show_inspector(bool show = true) { m_show_inspector = show; }
+    bool is_inspector_open() const { return m_show_inspector; }
 
 private:
     void render_top_bar(ProcessGraph& graph, Camera& camera, TelemetryCollector& collector,
                         EventDetector& event_detector, const TelemetrySnapshot& snapshot);
-    void render_inspector(ProcessGraph& graph, Camera& camera, const HistoryStore& history);
+    void render_inspector(ProcessGraph& graph, Camera& camera, const HistoryStore& history,
+                          const EventDetector& event_detector, const TelemetrySnapshot& snapshot,
+                          float delta_time);
     void render_bottom_panel(ProcessGraph& graph, Camera& camera, const HistoryStore& history,
                              EventDetector& event_detector);
     void render_settings_modal(TelemetryCollector& collector, Renderer& renderer,
@@ -44,6 +48,8 @@ private:
     bool m_show_bottom_panel{true};
     bool m_show_inspector{true};
     bool m_follow_selected{false};
+    float m_copy_feedback_timer{0.0f};
+    std::string m_copy_feedback_text;
 
     char m_search_buffer[128]{};
     GraphFilter m_filter;

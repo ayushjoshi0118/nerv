@@ -158,6 +158,7 @@ void Application::process_input() {
                 // Check if hit node on mouse down
                 if (left_btn == GLFW_PRESS && hit) {
                     m_graph.select_node(hit->identity);
+                    m_ui_mgr.show_inspector(true);
                     m_ui_mgr.cancel_following();
                 } else if (!hit && left_btn == GLFW_PRESS) {
                     m_graph.clear_selection();

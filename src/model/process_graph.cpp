@@ -259,8 +259,13 @@ void ProcessGraph::update_simulation(float delta_time) {
             node.termination_alpha -= dt * 2.5f;
             node.alpha = std::max(0.0f, node.termination_alpha);
             if (node.termination_alpha <= 0.0f) {
+                // If the user is actively inspecting this node, preserve it in a terminated ghost state
+                // so the inspector remains open with full post-mortem diagnostics!
                 if (m_selected_id == node.identity) {
-                    m_selected_id = {0, 0};
+                    node.alpha = 0.45f;
+                    node.base_color = colors::CriticalRed;
+                    ++it;
+                    continue;
                 }
                 it = m_nodes.erase(it);
                 continue;
@@ -489,6 +494,9 @@ void ProcessGraph::select_node(const ProcessIdentity& id) {
 
     if (auto* prev = get_node_by_identity(m_selected_id)) {
         prev->is_selected = false;
+        if (prev->is_terminating && prev->termination_alpha <= 0.0f) {
+            m_nodes.erase(m_selected_id);
+        }
     }
 
     m_selected_id = id;
@@ -500,6 +508,9 @@ void ProcessGraph::select_node(const ProcessIdentity& id) {
 void ProcessGraph::clear_selection() {
     if (auto* cur = get_node_by_identity(m_selected_id)) {
         cur->is_selected = false;
+        if (cur->is_terminating && cur->termination_alpha <= 0.0f) {
+            m_nodes.erase(m_selected_id);
+        }
     }
     m_selected_id = {0, 0};
 }
