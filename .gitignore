@@ -1,0 +1,12 @@
+build/
+out/
+.vs/
+*.user
+*.suo
+*.VC.db
+bin/
+lib/
+CMakeUserPresets.json
+.cache/
+compile_commands.json
+imgui.ini
